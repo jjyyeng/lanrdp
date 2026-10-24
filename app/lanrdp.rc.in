@@ -1,0 +1,41 @@
+// exe 资源段：程序图标 + 版本信息。任务栏、Alt+Tab、资源管理器「属性 → 详细信息」
+// 都只认这里；窗口标题栏的图标由代码里的 setWindowIcon(":/lanrdp.ico") 提供 ——
+// 两处都要，少一处就会在某个位置露出 Qt 的默认白方块。
+//
+// 本文件由 CMake 生成到构建目录，版本号从 project(VERSION ...) 注入 ——
+// 别在这里另写一份版本号。
+// 图标路径必须是绝对的：生成物在构建目录里，相对路径会指向空处。
+#include <windows.h>
+
+// ID 用 1：Windows 取资源段里 ID 最小的图标作为程序图标。
+1 ICON "@LANRDP_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @LANRDP_VERSION_RC@
+ PRODUCTVERSION @LANRDP_VERSION_RC@
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0409 = 英语（美国），04B0 = Unicode 代码页
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "lanrdp"
+            VALUE "FileDescription", "LAN Remote Desktop"
+            VALUE "FileVersion", "@PROJECT_VERSION@.0"
+            VALUE "InternalName", "lanrdp"
+            VALUE "LegalCopyright", "Copyright (C) 2026 lanrdp"
+            VALUE "OriginalFilename", "lanrdp.exe"
+            VALUE "ProductName", "lanrdp"
+            VALUE "ProductVersion", "@PROJECT_VERSION@.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,0 +1,13 @@
+﻿# 构建产物
+build/
+build-release/
+
+# 发布目录（windeployqt 打包产物）
+dist/
+
+# 本地临时文件
+.tmp/
+.tmp-test/
+
+# 测试生成的码流样本（仅用于人工查看，不入版本管理）
+h264_sample.264

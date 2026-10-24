@@ -1,0 +1,6 @@
+<RCC>
+    <!-- 图标随 qrc 编进 exe：dist/ 不必额外带一个 ico 文件，也不会因为漏拷而丢图标 -->
+    <qresource prefix="/">
+        <file alias="lanrdp.ico">lanrdp.ico</file>
+    </qresource>
+</RCC>
