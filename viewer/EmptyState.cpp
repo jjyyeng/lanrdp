@@ -42,8 +42,7 @@ EmptyState::EmptyState(QWidget *parent)
 
     icon_ = new QLabel(this);
     icon_->setObjectName(QStringLiteral("emptyIcon"));
-    icon_->setPixmap(glyph::pixmap(glyph::Shape::Monitor, kIconSize,
-                                   devicePixelRatioF(), theme::colors().textSecondary));
+    updateIcon();
     icon_->setAlignment(Qt::AlignCenter);
     root->addWidget(icon_, 0, Qt::AlignHCenter);
 
@@ -123,6 +122,23 @@ void EmptyState::setHostListening(bool listening)
     hostButton_->setToolTip(listening
         ? QStringLiteral("本机正在监听。点击停止监听，已连接的对方将全部断开。")
         : QStringLiteral("本机进入监听状态，等待对方连接。\n点击后需确认监听端口与访问口令。"));
+}
+
+void EmptyState::updateIcon()
+{
+    if (!icon_)
+        return;
+    icon_->setPixmap(glyph::pixmap(glyph::Shape::Monitor, kIconSize,
+                                   devicePixelRatioF(), theme::colors().textSecondary));
+}
+
+bool EmptyState::event(QEvent *event)
+{
+    // 跨缩放比拖动窗口（100% ↔ 150% 很常见）：构造时那张位图是按旧 DPR 栅格化的，
+    // 不重画就会糊成一团 —— 这是唯一需要重画图标的时机。
+    if (event->type() == QEvent::DevicePixelRatioChange)
+        updateIcon();
+    return QWidget::event(event);
 }
 
 bool EmptyState::eventFilter(QObject *watched, QEvent *event)

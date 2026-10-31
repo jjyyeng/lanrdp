@@ -28,6 +28,7 @@ class QTimer;
 class QToolButton;   // onClientListMenu 的锚点按钮
 
 namespace lanrdp {
+class AudioPlayer;
 class AuthClient;
 class ClientConnection;
 class ClipboardSync;
@@ -155,6 +156,12 @@ public:
     lanrdp::ScreenOverlayBar *overlayBar() const;       // 选中格的条
     lanrdp::ScreenRenderer   *screenRenderer() const;   // 选中格的画面
 
+    // 某一格的【屏幕】菜单（**新建**一个，调用方负责 delete / deleteLater）。
+    // 返回 nullptr = 这一格没有连接、还没收到屏列表、或只有一块屏。
+    // 抽成公开函数是为了让「菜单项 = 屏列表 + 当前项打勾」能被单测直接验证 ——
+    // 真点击走的是同一条构造路径（见 wireView）。
+    QMenu *createScreenMenu(lanrdp::RemoteView *view);
+
     // 一控多的格数上限（最多 4 台）。
     static int maxViews();
 
@@ -257,6 +264,16 @@ private:
 
     // 只有一格可见（一格 / 占满）时，允许渲染器在死区也开平滑缩放。
     void updateSmoothDeadZone();
+
+    // ---- 音频（对方的声音，单向下行）----
+    // 这一格此刻是否**该出声**：开关开着，且它就是当前选中格。
+    // 一控多时四路声音叠在一起没法听，所以只播一格（切格即时切声）。
+    bool isAudioSource(lanrdp::RemoteView *view) const;
+    // 按「开关 + 当前选中格」重配播放端：清缓冲，必要时按该格缓存的格式起播放线程。
+    void applyAudioRouting();
+    // 音频体检（定时）：只在真出问题时写日志。分不清「网络抖」与「设备欠载」时，
+    // 这三个数就是唯一的判据 —— 它们在界面上不常驻，只在日志里留证。
+    void reportAudioHealth();
 
     void log(const QString &line);
     void setStatusText(const QString &text);
@@ -375,6 +392,17 @@ private:
     lanrdp::HostController::UiState hostState_;
 
     lanrdp::ClipboardSync *clipboardSync_ = nullptr;  // 单实例剪贴板同步（绑 QClipboard）
+
+    // 音频播放（对方的声音）。**单实例**：只有选中格那一格出声，
+    // 所以不必每格一个播放器（每格一个会各自抢一块设备，反而要自己做混音）。
+    // 子对象随本窗口析构；`~MainWindow` 里先 `stopAndWait()` 收线程。
+    lanrdp::AudioPlayer *audioPlayer_ = nullptr;
+    // 【设置 → 接收对方的声音】的当前值（只对本次运行生效，与另两个全局偏好同规矩）。
+    bool    audioEnabled_ = true;
+    QAction *audioAction_ = nullptr;
+    // 上一次体检的计数（只在**变化**时写日志，避免正常播放也刷屏）。
+    quint64 audioStarvedSeen_  = 0;
+    qsizetype audioDroppedSeen_ = 0;
 
     bool inputEnabled_  = false;
     bool hostUseH264_   = true;

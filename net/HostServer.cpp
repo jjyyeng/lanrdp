@@ -243,6 +243,9 @@ void HostServer::removeSession(Session *session)
     if (!session)
         return;
 
+    // 不论认证成功还是中途断开 / 超时 / 被拒，会话离开时一定把 pending 记账清掉。
+    pendingAuth_.removeAll(session);
+
     if (sessions_.removeAll(session) > 0)
         emit clientDisconnected(session);
     session->deleteLater();
@@ -278,10 +281,23 @@ void HostServer::onNewConnection()
             continue;
         }
 
+        // 未认证连接上限：已 accept、握手未出结论的连接数超了就直接掐。
+        //
+        // 为什么不回 DENY 帧：这不是「认证结论」，回 DENY 会让上层把它统计成
+        // 「口令错 / 满员」；而且此时连 Session 都没建，没有发帧的通道。
+        // 也不计入退避 —— 上限挡的是瞬时洪峰，退避罚的是「口令猜错」，两者语义不同。
+        if (pendingAuth_.size() >= maxPendingAuth()) {
+            socket->abort();          // 立刻断，不留半开连接
+            socket->deleteLater();    // 它还是 QTcpServer 的子对象，自己不会回收
+            continue;
+        }
+
         Session *session = new Session(socket, this);
+        pendingAuth_.append(session);
 
         // 每个 Session 配一个握手器；握手器随 Session 一起销毁。
         AuthServer *auth = new AuthServer(password_, session);
+        auth->setTimeoutMs(handshakeTimeoutMs_);
         auth->attach(session);
 
         // 满员拒绝：鉴权通过（口令正确）但会话数已满时，在回 OK 之前拦截。
@@ -290,6 +306,8 @@ void HostServer::onNewConnection()
         auth->setAcceptGuard([this] { return sessions_.size() < maxClients_; });
 
         connect(auth, &AuthServer::authenticated, this, [this](Session *s) {
+            // 握手已出结论：不再算「未认证」，腾出 pending 名额。
+            pendingAuth_.removeAll(s);
             // 认证成功即清零该来源的失败计数（同 IP 的下一次尝试不再受罚）。
             backoff_.noteSuccess(s->socket() ? sourceIpKey(s->socket()->peerAddress())
                                              : QString());

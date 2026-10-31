@@ -50,7 +50,15 @@ protected:
     // 跟随父控件（画面）铺满。
     bool eventFilter(QObject *watched, QEvent *event) override;
 
+    // 大图标是按**构造时**的 devicePixelRatio 栅格化的位图：窗口被拖到另一个
+    // 缩放比的屏幕上时（100% ↔ 150% 很常见），这张位图不会自己重画，于是发糊。
+    // 这里只处理 QEvent::DevicePixelRatioChange，其余原样交回基类。
+    bool event(QEvent *event) override;
+
 private:
+    // 按**当前** DPR 重画大图标（构造时与 DPR 变化时各调一次）。
+    void updateIcon();
+
     QLabel      *icon_           = nullptr;
     QLabel      *title_          = nullptr;
     QLabel      *subtitle_       = nullptr;

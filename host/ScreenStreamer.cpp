@@ -197,9 +197,39 @@ void ScreenStreamer::clearTargets()
     droppedTargets_.clear();
 }
 
-void ScreenStreamer::start()
+void ScreenStreamer::setOutputIndex(int index)
 {
-    // 重新开始推送时不带着上一轮的退避余量。
+    // 同一个值不去抖：用户连点同一块屏不该反复重建抓屏器 / 刷 IDR。
+    if (outputIndex_ == index)
+        return;
+
+    outputIndex_ = index;
+
+    // 作废抓屏器，下个 tick 由 captureFrame 惰性重建（与 ACCESS_LOST 自愈同一条路径，
+    // 所以「换屏」这件事本身不需要第二套重建机制）。
+    if (capturer_) {
+        delete capturer_;
+        capturer_ = nullptr;
+    }
+
+    // ⚠️ 必须显式强制 IDR。encodeH264 只在「尺寸变了」时 dropEncoder()，
+    // 两块屏分辨率相同时编码器完全不动 ⇒ 不强制的话换屏后第一帧是 P 帧，
+    // 控制端要花屏到下一个自然关键帧（默认 GOP 2 s）。
+    forceKeyframe_ = true;
+
+    // 上一轮的失败退避不该挡住新选中的屏 —— 切屏常常发生在「刚拔掉一块屏」之后，
+    // 那时冷却计时器可能正压着，不清掉就会「切过去三秒没画面」。
+    retryCooldown_            = 0;
+    consecutiveFatalFailures_ = 0;
+}
+
+void ScreenStreamer::requestKeyframe()
+{
+    forceKeyframe_ = true;
+}
+
+void ScreenStreamer::start()
+{    // 重新开始推送时不带着上一轮的退避余量。
     retryCooldown_ = 0;
     if (!timer_->isActive())
         timer_->start(intervalMs_);
@@ -247,7 +277,7 @@ CaptureStatus ScreenStreamer::captureFrame(QImage *out, QString *error)
         capturer_ = new ScreenCapturer();
         QString initError;
         bool    recoverable = false;
-        if (!capturer_->init(&initError, &recoverable)) {
+        if (!capturer_->init(&initError, &recoverable, outputIndex_)) {
             delete capturer_;
             capturer_ = nullptr;
             if (error)
@@ -258,6 +288,11 @@ CaptureStatus ScreenStreamer::captureFrame(QImage *out, QString *error)
             // 回 Failed，连续几次后就停流了，用户得手动重新【开始监听】。
             return captureStatusForInitFailure(recoverable);
         }
+
+        // 请求的那块屏不在了 ⇒ ScreenCapturer 已回落主屏。把**真实** index 记下来，
+        // 这样上层广播出去的 SCREEN_LIST 与实际在抓的那块永远一致
+        //（否则控制端菜单会一直勾在一块不存在的屏上）。
+        outputIndex_ = capturer_->outputIndex();
     }
 
     QString captureError;

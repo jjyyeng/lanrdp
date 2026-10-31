@@ -81,15 +81,12 @@ int ViewGrid::indexOfView(QWidget *view) const
 
 void ViewGrid::setViews(const QVector<QWidget *> &views)
 {
-    // 旧视窗先摘钩子**并摘出布局** —— 它们可能被复用到别处，或即将被销毁。
-    // 只摘 eventFilter 不够：下面 views_ 被整体覆盖后，relayout() 遍历的是**新**列表，
-    // 不在新列表里的旧视窗其布局项就无人摘除（同格双 item / 幽灵格）。
+    // 旧视窗先**摘出布局** —— 它们可能被复用到别处，或即将被销毁。
+    // 只把列表换掉不摘布局项的话，relayout() 遍历的是**新**列表，不在新列表里的
+    // 旧视窗其布局项就无人摘除（同格双 item / 幽灵格）。
     for (QWidget *w : std::as_const(views_)) {
-        if (w) {
-            w->removeEventFilter(this);
-            if (grid_)
-                grid_->removeWidget(w);
-        }
+        if (w && grid_)
+            grid_->removeWidget(w);
     }
 
     // 「占满 / 选中」记的都是**下标**，而新名单里同一个视窗的下标很可能变了
@@ -100,11 +97,6 @@ void ViewGrid::setViews(const QVector<QWidget *> &views)
     QWidget *const keepSelected  = viewAt(selected_);
 
     views_ = views;
-
-    for (QWidget *w : std::as_const(views_)) {
-        if (w)
-            w->installEventFilter(this);
-    }
 
     // 归一化：按身份重映射；那一格已经不在名单里就退回默认（无占满 / 第一格）；
     // 选中退回时保留原下标并钳进范围 —— 语义是「选它旁边的那个」，
@@ -201,20 +193,6 @@ void ViewGrid::relayout()
         grid_->setColumnStretch(c, 1);
     for (int r = 0; r < rows; ++r)
         grid_->setRowStretch(r, 1);
-}
-
-bool ViewGrid::eventFilter(QObject *watched, QEvent *event)
-{
-    // 选中是**副作用**，绝不能吃掉事件：画面区的鼠标按键要照常走 ScreenRenderer
-    // 的输入采集路径（那是真正发往远端的操作）。所以这里只记一笔，永远返回 false。
-    if (event->type() == QEvent::MouseButtonPress) {
-        auto     *w     = qobject_cast<QWidget *>(watched);
-        const int index = w ? views_.indexOf(w) : -1;
-        if (index >= 0)
-            setSelectedIndex(index);
-    }
-
-    return QWidget::eventFilter(watched, event);
 }
 
 } // namespace lanrdp

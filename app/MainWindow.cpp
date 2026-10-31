@@ -23,8 +23,10 @@
 #include "net/FileReceiver.h"
 #include "net/HostServer.h"
 #include "net/Session.h"
+#include "protocol/AudioChunk.h"
 #include "protocol/Frame.h"
 #include "protocol/InputEvent.h"
+#include "viewer/AudioPlayer.h"
 #include "viewer/EmptyState.h"
 #include "viewer/RemoteView.h"
 #include "viewer/ScreenOverlayBar.h"
@@ -170,6 +172,23 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     buildUi();          // 建视窗 + 接线（含每格的条上控件与网格选中）
     setupClipboard();   // 剪贴板同步（仅文本）
 
+    // ---- 音频播放（对方的声音）----
+    // 单实例：只有选中格那一格出声。**构造时不碰任何设备** —— 第一次 `begin()`
+    // 才起线程，所以几十个 UI 用例构造本窗口不会去开声卡。
+    audioPlayer_ = new lanrdp::AudioPlayer(this);
+    connect(audioPlayer_, &lanrdp::AudioPlayer::failed, this, [this](const QString &reason) {
+        log(QStringLiteral("听不到对方的声音（画面不受影响）：%1").arg(reason));
+        setStatusText(QStringLiteral("本机音频输出不可用，听不到对方的声音"));
+    });
+
+    // 音频体检：10 s 一次，**只在计数变化时写一行日志**。
+    // 声音「卡一下」的原因分几种（网络抖 / 对端供不上 / 本机设备欠载 / 收得太慢丢块），
+    // 界面上看不出来，全靠这三个数落进日志 —— 所以它不进状态栏（不占像素），只进日志。
+    auto *audioHealth = new QTimer(this);
+    audioHealth->setInterval(10000);
+    connect(audioHealth, &QTimer::timeout, this, &MainWindow::reportAudioHealth);
+    audioHealth->start();
+
     // ---- 被控端宿主：一条工作线程 + 一个对象 ----
     // 监听 / 会话池 / 抓屏编码 / 输入注入 / 文件落盘 / 令牌门控全在它里面，而且**跑在
     // 自己的工作线程上**（`host_->moveToThread(hostThread_)`）。本窗口只把它的信号呈现成界面。
@@ -177,16 +196,18 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     hostThread_ = new QThread(this);
     // ⚠️ 宿主**必须无 parent** —— 有 parent 的对象不能 `moveToThread`。
     host_ = new lanrdp::HostController(logPort_.get());
+
+    // 启动参数必须在 `moveToThread` **之前**喂进去：此刻它还在本线程，直接写成员没有
+    // 并发问题；移进工作线程之后，这些写访问器会断言「必须在自己的线程里调用」
+    //（见 `HostController` 的线程纪律）。线程一起来就该按这套配置跑。
+    host_->setReceiveDir(hostRecvDir_);
+    host_->setCodec(hostUseH264_, hostBitrate_);
+
     host_->moveToThread(hostThread_);
     // 对象归属工作线程 ⇒ 只能在**那个线程**里销毁：Qt 官方范式。
     //（`QThreadPrivate::finish()` 在 emit `finished` 之后紧接着派发 DeferredDelete。
     //  用 `delete host_` 在主线程删，会连带在错误线程析构它的 QTimer 子对象。）
     connect(hostThread_, &QThread::finished, host_, &QObject::deleteLater);
-
-    // 启动参数在起线程**之前**喂进去：此刻还没有并发，直接调用是安全的
-    //（线程一起来就该按这套配置跑了）。
-    host_->setReceiveDir(hostRecvDir_);
-    host_->setCodec(hostUseH264_, hostBitrate_);
 
     connect(host_, &lanrdp::HostController::listening, this, &MainWindow::listening);
     connect(host_, &lanrdp::HostController::listenFailed, this, &MainWindow::listenFailed);
@@ -309,6 +330,11 @@ MainWindow::~MainWindow()
 
     // ① 停被控端业务（宿主此刻仍在工作线程上跑着，阻塞投递才完得成）。
     stopHost();
+
+    // 音频播放线程：它只碰本机声卡，与宿主线程无关，但必须在成员析构前停干净
+    //（`~AudioPlayer` 也会兜一次；这里显式停是为了「窗口正在拆」的那段空窗不再收帧）。
+    if (audioPlayer_)
+        audioPlayer_->stopAndWait();
 
     if (hostThread_) {
         // ② 掐掉「宿主 → 本窗口」的回连：`~HostController` 在**工作线程里**析构时会调
@@ -553,6 +579,15 @@ void MainWindow::wireView(lanrdp::RemoteView *v)
         if (auto *c = connectionOf(v))
             c->releaseToken();
     });
+    // 【屏幕】：只在被控端有多块屏时可见（单屏用户界面零变化）。
+    connect(v->screenButton(), &QToolButton::clicked, this, [this, v] {
+        QMenu *menu = createScreenMenu(v);
+        if (!menu)
+            return;
+        menu->exec(v->screenButton()->mapToGlobal(
+            QPoint(0, v->screenButton()->height())));
+        menu->deleteLater();
+    });
     // 断线格的两个出口（按格 —— 断的是哪一台，重连/关闭就是哪一台）。
     connect(v->retryButton(), &QToolButton::clicked, this, [this, v] { retryView(v); });
     connect(v->closeCellButton(), &QToolButton::clicked, this, [this, v] { closeView(v); });
@@ -601,6 +636,81 @@ void MainWindow::onGridSelectionChanged(int index)
     // 条标题里含「对端是谁」这类跟随状态的信息，选中一变就重刷。
     refreshViewUi();
     updateTokenStatus();
+
+    // 声音跟着选中格走：切格要**立刻**换声，并把上一格的尾巴清掉。
+    applyAudioRouting();
+}
+
+// 这一格此刻该不该出声：开关开着，且它就是当前选中格。
+//
+// 一控多时四路声音叠在一起没法听（也没有「谁更重要」的客观标准），所以只播一格。
+// 「按选中」而不是「按全部混音」还省掉了求和 + 限幅这一整套。
+bool MainWindow::isAudioSource(lanrdp::RemoteView *view) const
+{
+    if (!audioEnabled_ || !view || !grid_)
+        return false;
+    return view == views_.value(grid_->selectedIndex(), nullptr);
+}
+
+void MainWindow::applyAudioRouting()
+{
+    if (!audioPlayer_)
+        return;
+
+    // 无论开还是关，先把缓冲清空：否则「关掉声音」后还会把手上那 200 ms 播完，
+    // 而切格时会先听到上一台电脑的尾巴。
+    audioPlayer_->reset();
+
+    if (!audioEnabled_)
+        return;
+
+    auto *c = activeConnection();
+    // 格式用的是**这条连接缓存的那一份**（不是等到下一帧配置）：
+    // 错过开局那一帧配置的话，就得等对端换默认设备才会再有配置帧。
+    if (c && c->hasAudioFormat())
+        audioPlayer_->begin(c->audioFormat());
+}
+
+// 音频体检：正常就**一行都不写**，只在计数有变化时留一条证据。
+//
+// 判读口径（这是「卡一下」唯一能事后区分原因的地方）：
+// · 只有「断流」涨 → 网络抖动 / 对端供不上，音频链路本身没问题；
+// · 只有「丢弃」涨 → 本机处理不过来，抖动缓冲被上限裁了（延迟没炸，但声音有断层）；
+// · 两者都涨 + 队列深度接近 0 → 本机设备在被别的东西抢（或蓝牙链路本身在抖）。
+void MainWindow::reportAudioHealth()
+{
+    if (!audioPlayer_)
+        return;
+
+    const quint64   starved = audioPlayer_->starvedCount();
+    const qsizetype dropped = audioPlayer_->droppedBytes();
+
+    // 没在播、或缓冲刚被 reconfigure 重置（计数变小）⇒ 只拉平基线，不报。
+    if (!audioPlayer_->isActive() || starved < audioStarvedSeen_ || dropped < audioDroppedSeen_)
+    {
+        audioStarvedSeen_ = starved;
+        audioDroppedSeen_ = dropped;
+        return;
+    }
+
+    const quint64   starvedDelta = starved - audioStarvedSeen_;
+    const qsizetype droppedDelta = dropped - audioDroppedSeen_;
+    if (starvedDelta == 0 && droppedDelta == 0)
+        return;
+
+    audioStarvedSeen_ = starved;
+    audioDroppedSeen_ = dropped;
+
+    QString line = QStringLiteral("音频体检：设备队列 %1 ms").arg(audioPlayer_->queuedMs());
+    if (starvedDelta > 0)
+        line += QStringLiteral("，断流 %1 次（网络抖动或对端供不上）").arg(starvedDelta);
+    if (droppedDelta > 0)
+        line += QStringLiteral("，丢弃 %1 KiB（本机收得太慢，缓冲超过上限）")
+                    .arg(droppedDelta / 1024);
+    const QString error = audioPlayer_->lastError();
+    if (!error.isEmpty())
+        line += QStringLiteral("；上次错误：%1").arg(error);
+    log(line);
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +888,21 @@ void MainWindow::refreshViewUi()
         v->tokenStatusButton()->setVisible(live);
         v->releaseTokenButton()->setVisible(live);
         v->sendFileButton()->setVisible(live);
+        // 【屏幕】= 被控端有多块屏时才出现。单屏被控端上它与没有这项功能时一模一样，
+        // 窄格里也不会多挤掉一个按钮位置（一控多 2×2 时每格只有半个窗口宽）。
+        {
+            const auto *conn = connectionOf(v);
+            const bool multi = conn && conn->hasScreenList()
+                               && conn->screenList().screens.size() > 1;
+            v->screenButton()->setVisible(live && multi);
+            if (live && multi) {
+                const lanrdp::ScreenList &list = conn->screenList();
+                v->screenButton()->setToolTip(
+                    QStringLiteral("选择要看的屏幕：共 %1 块，当前是第 %2 块")
+                        .arg(list.screens.size())
+                        .arg(int(list.current) + 1));
+            }
+        }
         v->disconnectButton()->setVisible(live);
         // 格数 < 2 时置灰（「能不能占满」由 syncMaximizeState 统一刷）。
         v->maximizeButton()->setVisible(live);
@@ -900,6 +1025,21 @@ void MainWindow::buildViewMenu()
     open->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
     open->setStatusTip(QStringLiteral("断线自动重连 / 远程键鼠总开关"));
     connect(open, &QAction::triggered, this, &MainWindow::openSettingsDialog);
+
+    // 音频：**全局偏好**，所以入口只能在这里（与另两项同规矩，悬浮条上不挂）。
+    // 默认开 —— 默认关会造成「明明连着却听不见」的困惑，而听不听是随时可关的。
+    audioAction_ = settings->addAction(QStringLiteral("接收对方的声音"));
+    audioAction_->setObjectName(QStringLiteral("actionReceiveAudio"));
+    audioAction_->setCheckable(true);
+    audioAction_->setChecked(audioEnabled_);
+    audioAction_->setStatusTip(
+        QStringLiteral("听到对方电脑的系统声音（一控多时只播当前选中那一格）"));
+    connect(audioAction_, &QAction::toggled, this, [this](bool on) {
+        audioEnabled_ = on;
+        applyAudioRouting();
+        setStatusText(on ? QStringLiteral("已开启对方的声音")
+                         : QStringLiteral("已关闭对方的声音"));
+    });
 }
 
 // 窗口尺寸变了 -> 重新下发显示预算（解码输出尺寸上限框）。
@@ -1171,6 +1311,29 @@ void MainWindow::wireConnection(lanrdp::RemoteView *view)
                     setStatusText(QStringLiteral("文件发送失败"));
                 }
                 emit fileSent(ok, path, message);
+            });
+
+    // ---- 音频（对方的声音）：接上但**不按选中动态接线** ----
+    // 每格都接着，真正「该不该出声」由 isAudioSource() 在收到时判。
+    // 切格是高频操作，动态 connect/disconnect 一旦漏一次就是「这一格永远没声音」
+    // 这种看不见的状态；而每块 20 ms 一次判等，代价可以忽略。
+    connect(c, &lanrdp::ClientConnection::audioConfigReceived,
+            this, [this, view](const lanrdp::AudioFormat &format) {
+                if (isAudioSource(view))
+                    audioPlayer_->begin(format);
+            });
+    connect(c, &lanrdp::ClientConnection::audioDataReceived,
+            this, [this, view](qint64, const QByteArray &pcm) {
+                if (isAudioSource(view))
+                    audioPlayer_->push(pcm);
+            });
+
+    // ---- 多屏：屏列表变了就重刷这一格的条（显隐 + 悬停提示）----
+    // 不做本地推测：显不显示、勾哪一项，全部以这一份列表为准。
+    connect(c, &lanrdp::ClientConnection::screenListChanged,
+            this, [this, view](const lanrdp::ScreenList &) {
+                if (view)
+                    refreshViewUi();
             });
 }
 
@@ -1489,6 +1652,51 @@ void MainWindow::onClientListMenu(QToolButton *btn)
     connect(lock, &QAction::triggered, this, &MainWindow::onTakeInputButtonClicked);
 
     menu.exec(btn->mapToGlobal(QPoint(0, btn->height())));
+}
+
+// 选屏菜单：**内容 = 对端最近一次广播的屏列表**，当前那块打勾。
+//
+// 抽成独立函数（而不是内联在点击回调里）有两个理由：
+// 1) 「菜单项与列表一致」这件事能被单测直接验证，不必去捕一个正在模态弹出的菜单；
+// 2) 菜单弹出的瞬间列表可能又变了（对端切屏广播），构造与触发都在同一份快照上。
+QMenu *MainWindow::createScreenMenu(lanrdp::RemoteView *view)
+{
+    if (!view)
+        return nullptr;
+    const auto *conn = connectionOf(view);
+    if (!conn || !conn->hasScreenList())
+        return nullptr;
+
+    const lanrdp::ScreenList list = conn->screenList();
+    if (list.screens.size() < 2)
+        return nullptr;
+
+    auto *menu = new QMenu(view->screenButton());
+    for (int i = 0; i < list.screens.size(); ++i) {
+        const lanrdp::ScreenInfo &screen = list.screens.at(i);
+        QString text = QStringLiteral("屏 %1 · %2×%3")
+                           .arg(i + 1)
+                           .arg(screen.width)
+                           .arg(screen.height);
+        if (screen.primary)
+            text += QStringLiteral(" · 主屏");
+        QAction *action = menu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(i == int(list.current));
+        // 只发**请求**：真正生效与否看对端回来的新列表（本端不做乐观更新，
+        // 否则切屏失败时界面会一直停在「我以为切过去了」的状态）。
+        // 触发时才去问连接 —— 菜单弹出期间这一格可能被关掉 / 换了连接，
+        // 捕获裸指针会在那时变成悬空。
+        connect(action, &QAction::triggered, this, [this, view, i] {
+            auto *conn = connectionOf(view);
+            if (!conn || !conn->hasScreenList())
+                return;
+            if (i >= conn->screenList().screens.size())
+                return;   // 列表在弹出期间变短了（对端拔了一块屏）
+            conn->selectScreen(i);
+        });
+    }
+    return menu;
 }
 
 // 清空日志。只清**内存缓冲**，绝不动落盘文件。

@@ -6,6 +6,8 @@
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>
 #include <QRandomGenerator>
+#include <QTcpSocket>
+#include <QTimer>
 
 #include <utility>
 
@@ -74,6 +76,22 @@ void AuthServer::attach(Session *session)
 {
     session_ = session;
 
+    // 握手超时：连上却不给响应（或响应到一半就哑了）的连接必须在有限时间内放掉。
+    // 缺了它，未认证会话既不在 HostServer::sessions_（心跳判死只遍历池子，看不见它），
+    // 也不占 maxClients_ 名额 ⇒ 对端只要连着不说话就能永久挂着。
+    // 判死用 abort()：这种对端不会回 FIN，disconnectFromHost() 会卡在 ClosingState。
+    timeoutTimer_ = new QTimer(this);
+    timeoutTimer_->setSingleShot(true);
+    timeoutTimer_->setInterval(timeoutMs_);
+    connect(timeoutTimer_, &QTimer::timeout, this, [this]() {
+        if (done_)
+            return;
+        done_ = true;
+        if (session_ && session_->socket())
+            session_->socket()->abort();
+    });
+    timeoutTimer_->start();
+
     // 挑战-响应握手：服务端**先发** CHALLENGE。
     // 客户端连上后会发一帧空的 HandshakeReq 作「我来了」；但即便它没发，
     // 我们也在 attach 时立刻推 nonce —— 少一个往返、也少一个「等 REQ 超时」的状态。
@@ -102,6 +120,9 @@ void AuthServer::attach(Session *session)
 
         // 从这里开始一定会给出结论，先落闩 —— 无论结论是 OK 还是 DENY。
         done_ = true;
+        // 已出结论，超时表必须停：否则它会在几十秒后对着一条正常在用的连接 abort。
+        if (timeoutTimer_)
+            timeoutTimer_->stop();
 
         if (auth::verifyResponse(f.payload, password_, nonce_)) {
             // 口令正确，但容量等接受条件不满足时也按拒绝处理（在回 OK 之前判定）。

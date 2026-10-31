@@ -15,9 +15,10 @@ constexpr std::uint16_t kMagic    = 0x4C52;
 // 协议版本。
 // **v2 = 挑战-响应握手**（服务端先发 Challenge，客户端回 HMAC 响应）。
 // **v3 = CLIPBOARD_TEXT 去掉 4 字节 `seq` 头部**（载荷就是裸 UTF-8 文本）。
+// **v4 = 引入音频两帧**（AUDIO_CONFIG 17 / AUDIO_DATA 18，单向系统声音）。
 // v1 的「客户端先发 sha256 摘要」流程已废弃且被拒（tryParse 对不上版本直接 Invalid）。
 // 单二进制双角色、两端同时更新 ⇒ 无兼容负担（同心跳帧：本就要求同版本）。
-constexpr std::uint8_t  kVersion  = 3;
+constexpr std::uint8_t  kVersion  = 5;
 
 // 帧头固定 8 字节：
 // Magic[2]='LR' | Version[1] | Type[1] | PayloadLen[4, little-endian]
@@ -64,6 +65,12 @@ enum class FrameType : std::uint8_t
     // 载荷为空 —— 摘要不再上线，被动嗅探者拿不到可重放的东西。
     HandshakeChallenge = 15,
     HandshakeResponse  = 16,
+    // 音频（v4）：配置帧先于数据帧到达（TCP 有序）。
+    AudioConfig        = 17, // 载体格式（采样率 / 声道 / 位深 / 块长）
+    AudioData          = 18, // 时间戳 + S16LE 交织 PCM
+    // 多屏（v5）：LIST 是状态、SELECT 是请求，语义见 protocol/ScreenControl.h。
+    ScreenList         = 19, // 屏列表 + 当前在用哪块（被控端 → 控制端，唯一权威）
+    ScreenSelect       = 20, // 请求切到第几块（控制端 → 被控端）
 };
 
 // 从字节流前端解析一帧的结果

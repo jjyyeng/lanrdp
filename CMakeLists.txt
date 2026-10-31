@@ -33,6 +33,8 @@ add_library(lanrdp_core STATIC
     protocol/FileTransfer.cpp
     protocol/InputEvent.cpp
     protocol/Clipboard.cpp
+    protocol/AudioChunk.cpp
+    protocol/ScreenControl.cpp
     net/Session.cpp
     net/Auth.cpp
     # Phase 22（②⑭）：按来源 IP 分桶的登录失败退避（注入时钟的纯逻辑类）。
@@ -53,12 +55,20 @@ add_library(lanrdp_core STATIC
     host/ColorConvert.cpp
     host/MfRuntime.cpp
     host/H264Encoder.cpp
+    # 音频：被控端扇出（目标管理 + 格式补发 + 逐目标背压丢块）
+    host/AudioStreamer.cpp
+    # 音频：被控端 WASAPI loopback 采集（自己的线程；静默期靠轮询兜底）
+    host/AudioCapturer.cpp
     # Phase 19（⑨ 自适应码率）：积压→码率/帧率的策略纯函数
     host/AdaptiveBitrate.cpp
     host/TokenGate.cpp
     viewer/KeyMap.cpp
     viewer/H264Decoder.cpp
     viewer/DecoderWorker.cpp
+    # 音频：播放端抖动缓冲（纯策略，按字节深度决策，不读时钟）
+    viewer/AudioJitterBuffer.cpp
+    # 音频：控制端 WASAPI 共享渲染（自己的线程；设备失效重建）
+    viewer/AudioPlayer.cpp
     # Phase 11②：日志端口（内存缓冲 + 落盘）。纯逻辑、不依赖 QWidget，
     # 放 core 让 app 与测试都能直接链接，不必各自重复列出。
     app/LogPort.cpp
@@ -80,6 +90,10 @@ if (WIN32)
     target_link_libraries(lanrdp_core PRIVATE mfplat mfuuid mfreadwrite ole32 oleaut32)
     # DPAPI（CryptProtectData / CryptUnprotectData）：会话口令落盘前加密。
     target_link_libraries(lanrdp_core PRIVATE crypt32)
+    # WASAPI（音频）：CLSID_MMDeviceEnumerator / IID_IAudioClient 等 GUID 符号
+    # 在 MinGW 下由 libuuid 提供；KSDATAFORMAT_SUBTYPE_PCM / IEEE_FLOAT 在 libksguid
+    # —— 两者漏一个都是链接期 undefined reference。
+    target_link_libraries(lanrdp_core PRIVATE uuid ksguid)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -211,6 +225,32 @@ add_test(NAME test_h264frame COMMAND test_h264frame)
 add_executable(test_colorconvert tests/test_colorconvert.cpp)
 target_link_libraries(test_colorconvert PRIVATE lanrdp_core Qt6::Test)
 add_test(NAME test_colorconvert COMMAND test_colorconvert)
+
+# 音频两帧的线上格式（AUDIO_CONFIG / AUDIO_DATA）与定长块装配器
+add_executable(test_audiochunk tests/test_audiochunk.cpp)
+target_link_libraries(test_audiochunk PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_audiochunk COMMAND test_audiochunk)
+
+# 播放端抖动缓冲的策略（补静音 / 丢旧块，不依赖时钟）
+add_executable(test_audiojitter tests/test_audiojitter.cpp)
+target_link_libraries(test_audiojitter PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_audiojitter COMMAND test_audiojitter)
+
+# 多屏两帧的线上格式（SCREEN_LIST / SCREEN_SELECT，协议 v5）
+add_executable(test_screencontrol tests/test_screencontrol.cpp)
+target_link_libraries(test_screencontrol PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_screencontrol COMMAND test_screencontrol)
+
+# 被控端音频扇出（真 loopback 连接：目标管理 / 格式补发 / 背压丢块）
+add_executable(test_audiostreamer tests/test_audiostreamer.cpp)
+target_link_libraries(test_audiostreamer PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_audiostreamer COMMAND test_audiostreamer)
+
+# 音频的硬件往返（WASAPI loopback 采集 / 渲染）。没有音频设备的机器上 QSKIP。
+# ⚠️ 故意**不打桩**：这一层要测的正是设备交互本身。
+add_executable(test_audiohw tests/test_audiohw.cpp)
+target_link_libraries(test_audiohw PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_audiohw COMMAND test_audiohw)
 
 add_executable(test_h264encoder tests/test_h264encoder.cpp)
 target_link_libraries(test_h264encoder PRIVATE lanrdp_core Qt6::Test)
@@ -374,6 +414,11 @@ set(_lanrdp_qt_tests
     test_rendererdrop
     test_h264frame
     test_colorconvert
+    test_audiochunk
+    test_audiojitter
+    test_screencontrol
+    test_audiostreamer
+    test_audiohw
     test_h264encoder
     test_h264decoder
     test_decoderworker

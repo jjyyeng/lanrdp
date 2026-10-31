@@ -133,6 +133,18 @@ void RemoteView::buildUi()
     releaseTokenButton_->setEnabled(false);   // 手上没有操作权时无从让出
     row->addWidget(releaseTokenButton_);
 
+    // 【屏幕】—— 只在被控端有多块屏时出现（单屏用户界面零变化）。
+    // 图形用现成的显示器轮廓：它只在此处出现，不需要新画一对「两块屏」的图形，
+    // 少一份要跟着 DPR 调的几何就少一处出错的地方。
+    screenButton_ = newBarButton(bar_, QString(), QStringLiteral("screenButton"));
+    screenButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    screenButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
+    screenButton_->setIcon(glyph::icon(glyph::Shape::Monitor, theme::colors().textPrimary));
+    screenButton_->setAccessibleName(QStringLiteral("选择屏幕"));
+    screenButton_->setToolTip(QStringLiteral("选择要看的屏幕"));
+    screenButton_->setVisible(false);
+    row->addWidget(screenButton_);
+
     sendFileButton_ = newBarButton(bar_, QString(), QStringLiteral("sendFileButton"));
     sendFileButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     sendFileButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
@@ -357,7 +369,11 @@ bool RemoteView::eventFilter(QObject *watched, QEvent *event)
 
     // 旁观点击：只上报「用户在操作这一格」，**不消费**事件 ——
     // 画面区的左键/右键必须照常走 ScreenRenderer 的输入采集路径（那是真正发往远端的
-    // 操作），所以这里永远返回 false。这一点与 ViewGrid 的点击旁听是同一个约定。
+    // 操作），所以这里永远返回 false。
+    //
+    // 这是**唯一**的选中入口：ViewGrid 曾有一段「自己装 eventFilter 旁听点击」的
+    // 重复实现，但 renderer / 条 / 空态都覆盖整格并 accept，那段代码实际不可达
+    // （S6，2026-10-25 已删）。别再加回去。
     //
     // 过滤器装在子控件上（而不是靠事件冒泡上来的父控件）：Qt 的 installEventFilter
     // 在**事件交给目标本身之前**就回调，所以哪怕 ScreenRenderer 把事件 accept 掉了，

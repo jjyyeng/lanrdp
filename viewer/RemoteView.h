@@ -60,6 +60,11 @@ public:
     QToolButton *disconnectButton() const { return disconnectButton_; }
     QToolButton *releaseTokenButton() const { return releaseTokenButton_; }
 
+    // 【屏幕】（只在**被控端有多块屏**时出现）：点开选择要看哪一块。
+    // 显隐由 MainWindow 按「这一格收到的屏列表」刷 —— 单屏被控端上它永远不可见，
+    // 那条路径的界面必须与没有这项功能时一模一样（窄格里少挤掉一个按钮位置）。
+    QToolButton *screenButton() const { return screenButton_; }
+
     // 操作权状态的指示灯（控制端那颗指针图标，**不可点**，只有图形与悬停提示）。
     QToolButton *tokenStatusButton() const { return tokenStatusButton_; }
 
@@ -157,6 +162,7 @@ private:
     QToolButton *retryButton_        = nullptr;  // 重连
     QToolButton *closeCellButton_    = nullptr;  // 关闭
     QToolButton *releaseTokenButton_ = nullptr;  // 让出操作权
+    QToolButton *screenButton_       = nullptr;  // 选择要看哪一块屏（多屏时才可见）
     QToolButton *tokenStatusButton_  = nullptr;  // 操作权状态（不可点）
 
     std::unique_ptr<ClientConnection> connection_;

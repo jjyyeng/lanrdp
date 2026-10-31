@@ -121,7 +121,11 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     // （本机 listen 照常成功，只是外部连不进来）。
     //
     // 这里刻意**不自动加规则**：那需要管理员权限，而这辈子只点一两次，
-    // 不值得为此在程序里开一条提权链路。把「该勾哪个网络」说清就够。
+    // 不值得为此在程序里开一条提权链路。写明「连不上就去放行」就够。
+    //
+    // 文案**不提网络类型**：弹窗的复选框里「专用 / 公用」两项，勾哪个取决于
+    // 用户网卡被判成哪一类（同一台机器不同网卡分属两类很常见），指错一个
+    // 方向等于没放行。让用户自己去防火墙里放行，两种情况都覆盖。
     //
     // 颜色用 textSecondary（不是 formHint 那档 muted）：这段关系到能不能连上，
     // muted 压在深色底上只有 3.3:1，读起来太吃力。
@@ -131,7 +135,7 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     // 单参数 addRow 的 label 会紧贴上一行（表单的 verticalSpacing 管不到它的上方），
     // 补一点上边距，否则复选框和这段说明会挤成一块。
     firewallHint->setContentsMargins(0, 6, 0, 0);
-    firewallHint->setText(QStringLiteral("若弹出 Windows 防火墙提示，请勾选「专用网络」。"));
+    firewallHint->setText(QStringLiteral("若连接不上，请在 Windows 防火墙中放行本程序。"));
     form->addRow(firewallHint);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -209,15 +213,16 @@ ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
     password_->setPlaceholderText(QStringLiteral("至少 6 位"));
 
     // 与【开始监听…】同款的红字：平时隐藏，点【连接】才校验。
-    passwordError_ = new QLabel(this);
-    passwordError_->setObjectName(QStringLiteral("connectPasswordError"));
-    passwordError_->setWordWrap(true);
-    passwordError_->setVisible(false);
+    // 地址与口令共用这一条 —— 两类错误都属于「这一栏没填对」，不该用两种呈现方式。
+    error_ = new QLabel(this);
+    error_->setObjectName(QStringLiteral("connectErrorHint"));
+    error_->setWordWrap(true);
+    error_->setVisible(false);
 
     form->addRow(QStringLiteral("对方地址"), host_);
     form->addRow(QStringLiteral("对方端口"), port_);
     form->addRow(QStringLiteral("访问口令"), password_);
-    form->addRow(passwordError_);   // 横跨两列；平时隐藏
+    form->addRow(error_);   // 横跨两列；平时隐藏
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("连接"));
@@ -225,9 +230,13 @@ ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    // 一旦开始改就把上一轮的口令报错收起来（否则改对了红字还杵在那儿）。
+    // 一旦开始改就把上一轮的报错收起来（否则改对了红字还杵在那儿）。
+    // 两栏都接：只接口令栏的话，「地址为空」的红字会一直留到下次点【连接】。
     connect(password_, &QLineEdit::textChanged, this, [this](const QString &) {
-        passwordError_->setVisible(false);
+        error_->setVisible(false);
+    });
+    connect(host_, &QLineEdit::textChanged, this, [this](const QString &) {
+        error_->setVisible(false);
     });
 
     auto *box = new QVBoxLayout(this);
@@ -250,14 +259,17 @@ ConnectDialog::Config ConnectDialog::config() const
 void ConnectDialog::accept()
 {
     if (host_->text().trimmed().isEmpty()) {
-        host_->setPlaceholderText(QStringLiteral("请填写对方地址"));
+        // 与口令错误同一条红字、同一个位置：别用「改 placeholder」这种一次性提示 ——
+        // 用户根本分不清它跟红字是不是同一件事，而且下一次打开窗口它还在。
+        error_->setText(QStringLiteral("请填写对方地址。"));
+        error_->setVisible(true);
         host_->setFocus();
         return;
     }
     if (!isValidPassword(password_->text())) {
-        passwordError_->setText(
+        error_->setText(
             QStringLiteral("口令至少 6 位，且只能用英文字母、数字和符号。"));
-        passwordError_->setVisible(true);
+        error_->setVisible(true);
         password_->setFocus();
         return;
     }

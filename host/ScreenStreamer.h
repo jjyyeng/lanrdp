@@ -94,6 +94,22 @@ public:
     void clearTargets();
     int  targetCount() const { return targets_.size(); }
 
+    // ---- 多屏：选哪块输出 ----
+    // 换屏 = 作废抓屏器（下个 tick 走 captureFrame 的惰性重建，与 ACCESS_LOST 同一条路径）
+    // + 强制关键帧。传 -1 = 回到「主屏优先」。
+    // 值没变时是空操作 —— 用户连点同一块屏不该反复重建抓屏器 / 刷 IDR。
+    // ⚠️ 换屏**必须**强制 IDR：两块屏分辨率相同时编码器不会重建，
+    // 不强制就要花屏到下一个自然关键帧（默认 GOP 2 s）。
+    void setOutputIndex(int index);
+    int  outputIndex() const { return outputIndex_; }
+
+    // 让**下一帧**成为关键帧（只对 H.264 有意义；裸帧路径本来就是全帧）。
+    // 新观看者接入时内部已自动调过一次，外部需要它的场合是「控制端主动重同步」。
+    void requestKeyframe();
+
+    // 是否还有「待兑现的强制关键帧」请求（诊断 / 测试用）。
+    bool keyframeRequested() const { return forceKeyframe_; }
+
     void start();
     void stop();
     bool isRunning() const;
@@ -154,6 +170,7 @@ private:
 
     QTimer            *timer_      = nullptr;
     ScreenCapturer    *capturer_   = nullptr;  // 惰性创建（首次真正需要时）
+    int                outputIndex_ = -1;      // -1 = 主屏优先（见 setOutputIndex）
     FrameSource        source_;
     QVector<Session *> targets_;
     int                intervalMs_ = 100;

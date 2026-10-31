@@ -60,6 +60,11 @@ QString protectSecret(const QString &plain)
 
     // QString 内部就是 UTF-16，直接当字节数组交给 DPAPI，省掉一次编码转换 ——
     // 也就省掉了「转换时有损 ⇒ 解出来跟原来不是同一个口令」这类问题。
+    //
+    // 长度 = size() * sizeof(char16_t) 本来就是精确的，别「修正」成
+    // utf16().size() 或 toUtf8().size()：QString::size() 返回的就是 UTF-16
+    // **代码单元**数（BMP 外的字符是 surrogate pair，占 2 个单元 ⇒ 4 字节），
+    // 正好等于 utf16() 指向的字节数。曾有人报这里是 bug，核实是不成立的。
     const QByteArray raw(reinterpret_cast<const char *>(plain.utf16()),
                          plain.size() * static_cast<int>(sizeof(char16_t)));
 

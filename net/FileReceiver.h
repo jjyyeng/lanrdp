@@ -62,6 +62,10 @@ public:
     // 正在接收的文件数（并行路数）。
     int     activeCount() const;
 
+    // 内部记为「这个来源」的条目数（含已收完、状态已回 Idle 的）。
+    // 收完即 erase ⇒ 正常应恒等于 activeCount()；主要是给测试盯住「条目不回收」的回归。
+    int     trackedTransfers() const { return static_cast<int>(transfers_.size()); }
+
     // 下面几个是针对**单个来源**的查询；传 nullptr 时返回「最近活跃的那一路」，
     // 供只有一个接收方时的 UI 直接使用。
     QString currentFileName(Source from = nullptr) const;
@@ -77,7 +81,9 @@ public:
     void abort(Source from = nullptr);
 
 signals:
-    // 多路并行时这几个信号都带来源，调用方据此区分是哪一路。
+    // started / progress 带来源，调用方据此区分是哪一路。
+    // ⚠️ finished **不**带来源（签名稳定，改了要动 HostController 与 5 处测试连接）：
+    // 多路并行时若真需要区分，按 path 反查即可 —— 落盘路径本来就唯一。
     void started(lanrdp::FileReceiver::Source from, const QString &fileName, quint64 totalSize);
     void progress(lanrdp::FileReceiver::Source from, quint64 received, quint64 total);
     void finished(bool ok, const QString &path, const QString &message);

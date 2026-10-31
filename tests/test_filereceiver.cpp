@@ -46,6 +46,9 @@ private slots:
     void stalledTransferTimesOutAndCleansUp();
     void timeoutDoesNotFireWhileDataKeepsArriving();
     void abortAfterTimeoutDoesNotEmitAgain();
+
+    // 收完的条目必须扔掉（key 是裸指针，地址会被下一条连接复用）
+    void concludeDropsFinishedTransferEntry();
 };
 
 namespace {
@@ -758,6 +761,34 @@ void TestFileReceiver::abortAfterTimeoutDoesNotEmitAgain()
     QCOMPARE(result.count, 2);
     QVERIFY2(result.ok, qPrintable(result.message));
     QCOMPARE(QFileInfo(result.path).fileName(), QStringLiteral("after.bin"));
+}
+
+void TestFileReceiver::concludeDropsFinishedTransferEntry()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    lanrdp::FileReceiver receiver(dir.path());
+    Result               result;
+    capture(&receiver, &result);   // 只接一次：每轮再 capture 会叠加 lambda
+
+    const QByteArray content = makeContent(1024);
+
+    for (int round = 0; round < 5; ++round) {
+        result = Result{};
+
+        for (const lanrdp::Frame &f : buildTransfer(1, QStringLiteral("loop.bin"), content))
+            QVERIFY(receiver.onFrame(sourceA(), f));
+
+        QCOMPARE(result.count, 1);
+        QVERIFY2(result.ok, qPrintable(result.message));
+
+        // 收完即丢弃：条目没了，活跃数也归零。
+        // 判据是「条目数」而不是「能不能再收」—— 留着陈旧条目时再收也能成功，
+        // 只有等将来某个字段漏清才会以「上一个文件接着写」的形式爆出来。
+        QCOMPARE(receiver.trackedTransfers(), 0);
+        QCOMPARE(receiver.activeCount(), 0);
+    }
 }
 
 QTEST_GUILESS_MAIN(TestFileReceiver)

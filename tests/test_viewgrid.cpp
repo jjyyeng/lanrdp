@@ -296,26 +296,6 @@ private slots:
         QCOMPARE(grid.selectedIndex(), 0);
     }
 
-    // 「点哪一格就操作哪一格」：点击事件只用来**记下**选中，绝不能吃掉 ——
-    // 画面区的左键要照常走 ScreenRenderer 的输入采集（那是发往远端的真实操作）。
-    void clickingAViewSelectsItWithoutEatingTheEvent()
-    {
-        ViewGrid grid;
-        const QVector<QWidget *> ws = makeWidgets(2, &grid);
-        grid.setViews(ws);
-
-        QSignalSpy spy(&grid, &ViewGrid::selectedChanged);
-
-        QMouseEvent press(QEvent::MouseButtonPress, QPointF(5, 5), QPointF(5, 5),
-                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(ws[1], &press);
-
-        QCOMPARE(grid.selectedIndex(), 1);
-        QCOMPARE(spy.count(), 1);
-        QVERIFY2(press.isAccepted() == false,
-                 "ViewGrid 只旁观点击，不得 accept —— 事件要留给画面控件转发远端");
-    }
-
     // 视窗变少时（断开一台 / 切回被控模式），越界的占满与选中索引必须归一化，
     // 否则下一次 relayout 会读到不存在的格子。
     void shrinkingViewsNormalizesMaximizedAndSelection()
@@ -337,7 +317,7 @@ private slots:
             if (w)
                 QVERIFY2(!w->isHidden(), "重排后剩下的视窗都该显示");
 
-        // 被摘出列表的两格必须**彻底脱离布局** —— 只摘 eventFilter 不摘布局项的话，
+        // 被摘出列表的两格必须**彻底脱离布局** —— 只把 views_ 换掉不摘布局项的话，
         // 它们会留在 QGridLayout 里变成幽灵格（同格双 item / 错位）。
         auto *layout = qobject_cast<QGridLayout *>(grid.layout());
         QVERIFY2(layout, "ViewGrid 内部应当是一个 QGridLayout");

@@ -17,6 +17,7 @@
 #include "net/HostServer.h"
 #include "net/Session.h"
 #include "protocol/H264Frame.h"
+#include "protocol/ScreenControl.h"
 #include "viewer/H264Decoder.h"
 
 // 端到端回归：ClientConnection 把 H.264 收到 -> 交给解码线程 -> frameReady 到上层。
@@ -36,6 +37,9 @@ private slots:
     void sizeFlipIsThrottled();
     // 心跳不能「收到就回」—— 两端都回会形成无限乒乓
     void heartbeatDoesNotPingPong();
+    // 多屏：列表是缓存 + 信号，选屏是往对端发一次请求
+    void cachesScreenListFromHost();
+    void selectScreenSendsRequest();
 };
 
 namespace {
@@ -396,6 +400,76 @@ void TestClientConnectionH264::heartbeatDoesNotPingPong()
              qPrintable(QStringLiteral("客户端对心跳回了 %1 帧 —— 心跳正在乒乓").arg(fromClient)));
 
     qInfo("heartbeat frames from client in 600 ms: %d", fromClient);
+}
+
+// 多屏：被控端广播的 SCREEN_LIST 必须被缓存 + 转成信号（界面按它决定
+// 【屏幕】入口显不显示、勾哪一项）。非法载荷静默丢弃，不许影响画面链路。
+void TestClientConnectionH264::cachesScreenListFromHost()
+{
+    E2E e2e;
+    QVERIFY2(e2e.start(), "handshake with local HostServer failed");
+    QVERIFY(!e2e.client.hasScreenList());
+
+    QSignalSpy listSpy(&e2e.client, &lanrdp::ClientConnection::screenListChanged);
+
+    lanrdp::Session *srv = e2e.serverSession();
+    QVERIFY2(srv != nullptr, "server-side session not found");
+
+    // 先发一份坏载荷：必须被丢弃，缓存仍为空
+    srv->sendFrame(static_cast<std::uint8_t>(lanrdp::FrameType::ScreenList),
+                   QByteArray("bogus"));
+    QTest::qWait(100);
+    QVERIFY(!e2e.client.hasScreenList());
+    QCOMPARE(listSpy.count(), 0);
+
+    lanrdp::ScreenList list;
+    lanrdp::ScreenInfo primary;
+    primary.width   = 3840;
+    primary.height  = 2160;
+    primary.primary = true;
+    lanrdp::ScreenInfo second;
+    second.x      = -1920;
+    second.width  = 1920;
+    second.height = 1080;
+    list.screens << primary << second;
+    list.current = 1;
+
+    srv->sendFrame(static_cast<std::uint8_t>(lanrdp::FrameType::ScreenList),
+                   lanrdp::encodeScreenList(list));
+
+    QTRY_VERIFY_WITH_TIMEOUT(e2e.client.hasScreenList(), 5000);
+    QCOMPARE(listSpy.count(), 1);
+    const lanrdp::ScreenList cached = e2e.client.screenList();
+    QCOMPARE(cached.screens.size(), 2);
+    QCOMPARE(cached.current, quint8(1));
+    QVERIFY(cached.currentScreen() != nullptr);
+    QCOMPARE(cached.currentScreen()->x, qint32(-1920));
+}
+
+// 选屏 = 往对端发一次 SCREEN_SELECT。未就绪时必须拒发（不能对着空气发请求）。
+void TestClientConnectionH264::selectScreenSendsRequest()
+{
+    E2E e2e;
+    QVERIFY2(e2e.start(), "handshake with local HostServer failed");
+
+    lanrdp::Session *srv = e2e.serverSession();
+    QVERIFY2(srv != nullptr, "server-side session not found");
+
+    QVector<quint8> selected;
+    QObject::connect(srv, &lanrdp::Session::frameReceived, srv,
+                     [&selected](const lanrdp::Frame &f) {
+                         if (f.type != static_cast<std::uint8_t>(lanrdp::FrameType::ScreenSelect))
+                             return;
+                         if (auto idx = lanrdp::decodeScreenSelect(f.payload))
+                             selected.append(*idx);
+                     });
+
+    QVERIFY(e2e.client.selectScreen(1));
+    QTRY_VERIFY_WITH_TIMEOUT(!selected.isEmpty(), 5000);
+    QCOMPARE(selected.last(), quint8(1));
+
+    // 越界的序号在本地就拒掉，不发出去
+    QVERIFY(!e2e.client.selectScreen(999));
 }
 
 QTEST_GUILESS_MAIN(TestClientConnectionH264)

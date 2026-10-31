@@ -89,6 +89,9 @@ void ClientConnection::connectTo(const QString &host, quint16 port, const QStrin
     teardown();
     handshakeReported_ = false;
     authRejected_      = false;   // 新的一次尝试：重新给「口令可能已被改对」的机会
+    // 音频格式是**上一条会话**的事实，新会话要重新听说（对端接入新目标时会补发配置）。
+    // 留着旧的会让播放端按错的采样率起来 —— 听起来是慢放/快放。
+    hasAudioFormat_ = false;
 
     // 记下这次连接的参数（断线后重连要用 —— 口令以前只活在输入框里），
     // 并清掉「用户主动断开」标记；若已有重连在排队，这次连接直接把它顶掉。
@@ -219,6 +222,11 @@ void ClientConnection::teardown()
         emit tokenChanged(false);
     }
     tokenRequested_ = false;  // 新会话重新申请，别被上一次的状态卡住
+
+    // 屏列表属于「这条连接的那台机器」：换一台 / 重连之后必须当没收到过，
+    // 否则条上【屏幕】会拿上一台的列表去显示（数量对不上时直接崩在越界上）。
+    hasScreenList_ = false;
+    screenList_    = lanrdp::ScreenList();
 
     // 发送器绑定在旧的 session 上，必须先中止并销毁
     if (fileSender_) {
@@ -380,6 +388,23 @@ void ClientConnection::ensureFileSender()
             });
 }
 
+bool ClientConnection::selectScreen(int index)
+{
+    // 未握手就发等于对着空气发请求（对端还没建会话，帧会被丢弃）。
+    if (!session_ || !ready_)
+        return false;
+    if (index < 0 || index >= kMaxScreens)
+        return false;
+
+    const QByteArray payload = encodeScreenSelect(static_cast<quint8>(index));
+    if (payload.isEmpty())
+        return false;
+
+    session_->sendFrame(static_cast<std::uint8_t>(FrameType::ScreenSelect), payload);
+    emit logMessage(QStringLiteral("请求切换到第 %1 块屏").arg(index + 1));
+    return true;
+}
+
 bool ClientConnection::sendFile(const QString &path)
 {
     if (!session_ || !ready_)
@@ -439,6 +464,38 @@ void ClientConnection::handleFrame(const Frame &frame)
     // 剪贴板（仅文本）—— 交给上层的同步器处理
     if (type == static_cast<std::uint8_t>(FrameType::ClipboardText)) {
         emit clipboardReceived(frame);
+        return;
+    }
+
+    // 音频（v4）。⚠️ 这一对分支**不得**碰 `rxFrames_` / `rxBytes_`
+    //（那是画面统计口径），也不得影响令牌与解码器状态 —— 音频是并列的第二链路。
+    if (type == static_cast<std::uint8_t>(FrameType::AudioConfig)) {
+        const auto format = decodeAudioConfig(frame.payload);
+        if (!format)
+            return;   // 坏帧静默丢弃
+        hasAudioFormat_ = true;
+        audioFormat_    = *format;
+        emit audioConfigReceived(*format);
+        return;
+    }
+    if (type == static_cast<std::uint8_t>(FrameType::AudioData)) {
+        // 有配置帧就要求 PCM 是整帧的整数倍（非整帧会让播放端的字节队列永久错位）。
+        const auto chunk = decodeAudioData(frame.payload, hasAudioFormat_ ? &audioFormat_ : nullptr);
+        if (!chunk)
+            return;
+        emit audioDataReceived(chunk->tsMs, chunk->pcm);
+        return;
+    }
+
+    // 多屏（v5）：这里是**状态**，被控端说了算 —— 本端只缓存 + 通知界面。
+    // 坏载荷静默丢弃：一块屏都列不出来不值得把整条连接断掉，界面保持原样即可。
+    if (type == static_cast<std::uint8_t>(FrameType::ScreenList)) {
+        const auto list = decodeScreenList(frame.payload);
+        if (!list)
+            return;
+        screenList_    = *list;
+        hasScreenList_ = true;
+        emit screenListChanged(screenList_);
         return;
     }
 

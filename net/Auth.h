@@ -8,6 +8,8 @@
 
 #include "net/Session.h"  // moc 需要完整类型（信号携带 Session*）
 
+class QTimer;
+
 namespace lanrdp {
 
 namespace auth {
@@ -59,6 +61,11 @@ public:
     using AcceptGuard = std::function<bool()>;
     void setAcceptGuard(AcceptGuard guard) { acceptGuard_ = std::move(guard); }
 
+    // 握手超时（毫秒）。attach() 时起一个单次定时器，到点还没出结论就 abort。
+    // 必须在 attach() **之前**设置（attach 时才读它）。
+    void setTimeoutMs(int ms) { timeoutMs_ = ms; }
+    int  timeoutMs() const { return timeoutMs_; }
+
 signals:
     void authenticated(lanrdp::Session *session);
     void rejected(lanrdp::Session *session);
@@ -78,6 +85,10 @@ private:
     // authenticated 触发多次 —— 上层按「每次 authenticated 就 append + 接一份收帧 lambda」
     // 实现时，同一会话会被注入两次输入、还独占 4 个名额里的 4 个。
     bool         done_ = false;
+
+    // 握手超时定时器（attach 时创建，出结论时停止）。仅本类持有。
+    QTimer      *timeoutTimer_ = nullptr;
+    int          timeoutMs_    = 10000;
 };
 
 // 客户端侧握手（挑战-响应）：发一帧空 HANDSHAKE_REQ 声明 + 发起，

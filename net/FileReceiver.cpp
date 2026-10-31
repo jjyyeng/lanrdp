@@ -359,6 +359,12 @@ void FileReceiver::conclude(Source from, bool ok, const QString &message)
     if (!ok && !path.isEmpty())
         QFile::remove(path);
 
+    // 收完即把条目扔掉。key 是**不透明指针**（生产上是 Session*），地址会被下一条
+    // 连接复用 —— 留着陈旧条目，将来只要有人在这个函数里漏清一个字段，新会话就会
+    // 继承上一次的文件句柄 / 校验状态。必须在 emit **之前** erase：接收方在
+    // finished 槽里可能立刻开下一笔传输（插入会让迭代器失效）。
+    transfers_.erase(it);
+
     emit finished(ok, path, message);
 }
 

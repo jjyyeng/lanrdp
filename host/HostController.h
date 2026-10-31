@@ -2,6 +2,7 @@
 
 #include "host/TokenGate.h"
 #include "protocol/Frame.h"
+#include "protocol/ScreenControl.h"
 
 #include <QByteArray>
 #include <QImage>
@@ -9,6 +10,7 @@
 #include <QRect>
 #include <QSize>
 #include <QString>
+#include <QThread>
 #include <QVector>
 
 #include <unordered_map>
@@ -17,6 +19,8 @@ class QTimer;
 
 namespace lanrdp {
 
+class AudioCapturer;
+class AudioStreamer;
 class FileReceiver;
 class HostServer;
 class LogPort;
@@ -83,19 +87,29 @@ public:
     quint16 port() const;
 
     // 编码方式（用户**意图**；H.264 打不开时 ScreenStreamer 会自行降级为裸帧）。
+    // 写访问器 —— 与 setPreviewEnabled 同规矩：Debug 下断言在本线程（见 .cpp）。
     void setCodec(bool useH264, int bitrateBps = 8 * 1000 * 1000);
     bool usesH264() const { return useH264_; }
     int  bitrate() const { return bitrate_; }
 
     // 接收文件的落盘目录。调用方负责在 start() 之前给一个非空默认值
     // ——本类刻意不内建默认值，免得又引入一个「相对路径按进程 CWD 解析」的坑。
+    // 写访问器 —— 同 setCodec：Debug 下断言在本线程。
     void    setReceiveDir(const QString &dir);
     QString receiveDir() const { return receiveDir_; }
 
     // 本机预览开关。**关闭时根本不 emit `previewFrame`** —— 过滤必须留在这一侧：
     // 跨线程投递下，GUI 若被模态循环占住，队列会积压（4K 每帧独立缓冲 ≈33 MB，
     // 20 s 就够上 GB）。`frameSizeChanged` 仍无条件发（状态栏要用）。
-    void setPreviewEnabled(bool on) { previewEnabled_ = on; }
+    //
+    // ⚠️ 这是**写**访问器：必须在本对象所属线程调用（GUI 侧走 `MainWindow::postToHost`）。
+    // 把这条纪律从注释变成 Debug 下当场可见的失败 —— 否则漏一个调用点就是无痕数据竞争。
+    void setPreviewEnabled(bool on)
+    {
+        Q_ASSERT_X(thread() == QThread::currentThread(), "HostController::setPreviewEnabled",
+                   "must run on the controller's own thread (GUI must go through postToHost)");
+        previewEnabled_ = on;
+    }
     bool previewEnabled() const { return previewEnabled_; }
 
     // 剪贴板（UI 侧调，投递到本线程执行）：把已编码好的帧发给当前持令牌的控制端。
@@ -120,6 +134,19 @@ public:
     quint64 injectFailedCount() const { return injectFailedCount_; }
     QString sourceInfo() const;
     QString codecInfo() const;
+
+    // 音频采集线程是否在跑（诊断 / 测试用；原子读，可跨线程问）。
+    // 它的生命周期与「有没有控制端」绑定：第一个目标接入时起、最后一个离开时停。
+    bool audioCaptureRunning() const;
+    QString audioInfo() const;
+
+    // ---- 多屏（协议 v5）----
+    // 当前正在编的那块屏（枚举 index）。首次抓帧前报主屏；没有可用屏时 -1。
+    // 「屏列表 + 当前哪块」的唯一事实在 `ScreenStreamer::outputIndex()` 与实时枚举里，
+    // 本类不另存一份状态位（否则切屏失败 / 拔屏回落时两份会说不一样的话）。
+    int screenOutputIndex() const;
+    // 当前屏列表的条数（诊断 / 测试用）。
+    int screenCount() const;
 
 signals:
     void listening(quint16 port);
@@ -179,14 +206,32 @@ private:
     void    notifyUi();
     void applyCodec();
     void ensureFileReceiver();
+    // 幂等：在当前线程里建音频扇出 + 采集线程（只从 start() 调）。
+    // 采集起来了不等于在跑 —— 由「有目标接入」驱动（见 handleAuthenticated）。
+    void ensureAudio();
     QRect targetMonitorRect() const;
     void  onIdleCheck();
+
+    // ---- 多屏 ----
+    // 把「屏列表 + 当前哪块」广播给**所有**被控会话。
+    // 只在三处调用：某连接鉴权通过、收到 SCREEN_SELECT 之后、状态需要校正时。
+    // 一份权威状态发给所有人，控制端之间就不可能对「现在推的是哪块」有分歧。
+    void broadcastScreenList();
+    // 处理一次选屏**请求**：校验 → 生效（或拒绝）→ 无论成败都回一份新状态。
+    void applyScreenSelect(quint8 index);
+    // 把实时枚举结果转成线上用的几何（按值，可跨线程带）。
+    static QVector<lanrdp::ScreenInfo> currentScreens();
 
     LogPort *logPort_ = nullptr;   // 不持有
 
     HostServer     *host_         = nullptr;
     ScreenStreamer *streamer_     = nullptr;
     FileReceiver   *fileReceiver_ = nullptr;
+
+    // 音频：扇出（宿主线程）+ 采集线程（自己的线程）。
+    // 采集线程是 QThread 子类，随本对象析构 —— 析构里会 `stopAndWait()`。
+    AudioStreamer *audio_         = nullptr;
+    AudioCapturer *audioCapturer_ = nullptr;
 
     TokenGate tokenGate_;
     std::unordered_map<Session *, TokenGate::Token> tokenIds_;

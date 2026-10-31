@@ -32,6 +32,34 @@ quint16 normalizeAxis(int pixel, int origin, int size)
     return static_cast<quint16>(scaled);
 }
 
+// 同一个物理键的另一套虚拟键码：小键盘 ↔ 主键盘。
+//
+// 为什么需要它：按下时戴着 `KeypadModifier`、映射成 VK_NUMPAD5；若按住期间
+// NumLock 被切掉，抬起时的修饰符没了、映射成 '5'(0x35)。按 vk 记账就找不到
+// 那笔按下 ⇒ 抬起被吞 ⇒ 远端那个键永久按下（用户视角：键盘坏了）。
+// 抬起时用这个函数反查一次，把账销在**按下时**那个码上。
+int alternateVk(int vk)
+{
+    // 小键盘 0-9 ↔ 主键盘 0-9
+    if (vk >= 0x60 && vk <= 0x69)
+        return 0x30 + (vk - 0x60);
+    if (vk >= 0x30 && vk <= 0x39)
+        return 0x60 + (vk - 0x30);
+
+    // 运算符键：小键盘码 ↔ OEM 码（VK_MULTIPLY 没有主键盘对应，* 是 Shift+8）
+    switch (vk) {
+    case 0x6B: return 0xBB;   // VK_ADD      ↔ VK_OEM_PLUS
+    case 0x6D: return 0xBD;   // VK_SUBTRACT ↔ VK_OEM_MINUS
+    case 0x6E: return 0xBE;   // VK_DECIMAL  ↔ VK_OEM_PERIOD
+    case 0x6F: return 0xBF;   // VK_DIVIDE   ↔ VK_OEM_2（/）
+    case 0xBB: return 0x6B;
+    case 0xBD: return 0x6D;
+    case 0xBE: return 0x6E;
+    case 0xBF: return 0x6F;
+    default:   return 0;
+    }
+}
+
 } // namespace
 
 ScreenRenderer::ScreenRenderer(QWidget *parent)
@@ -423,22 +451,37 @@ bool ScreenRenderer::handleKeyEvent(QKeyEvent *event, bool pressed)
     const std::uint16_t vk = qtKeyToVirtualKey(qtKey, event->modifiers());
 
     if (!pressed) {
-        if (vk == 0 || !pressedKeys_.contains(static_cast<int>(vk)))
-            return inputEnabled_;   // 没记过的抬起：开关关着就当没看见
-        pressedKeys_.remove(static_cast<int>(vk));
-        emit keyChanged(static_cast<int>(vk), false, qtKeyIsExtended(qtKey, event->modifiers()));
-        return true;
+        if (vk != 0 && pressedKeys_.contains(static_cast<int>(vk))) {
+            pressedKeys_.remove(static_cast<int>(vk));
+            emit keyChanged(static_cast<int>(vk), false, qtKeyIsExtended(qtKey, event->modifiers()));
+            return true;
+        }
+
+        // 按住期间 NumLock 被切：抬起映射成了另一个码（小键盘 ↔ 主键盘），
+        // 按 vk 找不到那笔按下。这里反查一次，把账销在**按下时**那个 vk 上 ——
+        // 否则抬起被吞，远端那个键永久按下。
+        const int alt = alternateVk(static_cast<int>(vk));
+        if (alt != 0 && pressedKeys_.contains(alt)) {
+            pressedKeys_.remove(alt);
+            emit keyChanged(alt, false, qtKeyIsExtended(qtKey, event->modifiers()));
+            return true;
+        }
+
+        return inputEnabled_;   // 没记过的抬起：开关关着就当没看见
     }
 
     if (!inputEnabled_)
         return false;
 
+    // 不支持的键交给上层（例如留着以后做本地快捷键）。
+    // ⚠️ 这条必须排在 autoRepeat 之前：否则首次按下冒泡、长按重复却被吞，
+    // 同一颗键前后不一致（上层看到「按下」，却拿不到重复）。
+    if (vk == 0)
+        return false;
+
     // 长按产生的重复按键由被控端系统自行产生，这里只转发首次按下，避免重复注入
     if (event->isAutoRepeat())
         return true;
-
-    if (vk == 0)
-        return false;  // 不支持的键交给上层（例如留着以后做本地快捷键）
 
     pressedKeys_.insert(static_cast<int>(vk));
     emit keyChanged(static_cast<int>(vk), true, qtKeyIsExtended(qtKey, event->modifiers()));

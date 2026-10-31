@@ -37,6 +37,10 @@ private slots:
     void disablingInputReleasesPressedKeys();
     // ⚠️ 失焦**不**补发（点悬浮条会失焦，误松键）
     void losingFocusDoesNotReleasePressedKeys();
+    // 按住期间 NumLock 被切：release 映射成主键盘码，按 vk 记账不命中 ⇒ 抬起被吞
+    void releaseAfterNumLockToggleStillReleases();
+    // 未映射键（vk == 0）：首次按下冒泡给上层，长按重复也必须冒泡 —— 否则同一次按键前后不一致
+    void unmappedKeyAutoRepeatBubblesLikeFirstPress();
     // 按键 / 滚轮载荷要带最后一次坐标
     void buttonAndWheelCarryLastPosition();
 };
@@ -246,6 +250,63 @@ void TestRenderer::releaseAllPressedEmitsEveryPressedKey()
     for (int i = 0; i < keys.count(); ++i)
         releasedVks.insert(keys.at(i).at(0).toInt());
     QCOMPARE(releasedVks.size(), 2);
+}
+
+void TestRenderer::releaseAfterNumLockToggleStillReleases()
+{
+    lanrdp::ScreenRenderer renderer;
+    primeRenderer(renderer);
+
+    QSignalSpy keys(&renderer, &lanrdp::ScreenRenderer::keyChanged);
+
+    // 按下小键盘 5：KeypadModifier 在 ⇒ 映射成 VK_NUMPAD5(0x65)
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_5, Qt::KeypadModifier);
+    QCoreApplication::sendEvent(&renderer, &press);
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x65);
+    QCOMPARE(keys.at(0).at(1).toBool(), true);
+
+    keys.clear();
+
+    // 按住期间 NumLock 被切换：release 时 KeypadModifier 消失 ⇒ 映射成 '5'(0x35)。
+    // 按 vk 记账不命中，但这次抬起**必须**照样发出去（发的是按下时的那个 vk），
+    // 否则远端那个键永久按下 —— 用户视角就是「键盘坏了」。
+    QKeyEvent release(QEvent::KeyRelease, Qt::Key_5, Qt::NoModifier);
+    QCoreApplication::sendEvent(&renderer, &release);
+
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x65);
+    QCOMPARE(keys.at(0).at(1).toBool(), false);
+}
+
+// 未映射键（vk == 0，例如 Qt::Key_unknown）的**首次按下**一直是冒泡给上层的
+// （留着做本地快捷键）。但它的长按重复以前被静默吞掉 —— 于是同一颗键前后不一致：
+// 上层看到「按下」，重复却拿不到。修法是把 vk == 0 的判断提到 autoRepeat 之前。
+void TestRenderer::unmappedKeyAutoRepeatBubblesLikeFirstPress()
+{
+    lanrdp::ScreenRenderer renderer;
+    primeRenderer(renderer);
+
+    QSignalSpy keys(&renderer, &lanrdp::ScreenRenderer::keyChanged);
+
+    QKeyEvent first(QEvent::KeyPress, Qt::Key_unknown, Qt::NoModifier);
+    QCoreApplication::sendEvent(&renderer, &first);
+    QVERIFY2(!first.isAccepted(), "未映射键的首次按下应当冒泡，不往上吞");
+
+    // 同一颗键的长按重复：必须与首次按下走同一条路
+    QKeyEvent repeat(QEvent::KeyPress, Qt::Key_unknown, Qt::NoModifier, QString(), true);
+    QVERIFY2(repeat.isAutoRepeat(), "构造出来的应当是 autoRepeat 事件");
+    QCoreApplication::sendEvent(&renderer, &repeat);
+    QVERIFY2(!repeat.isAccepted(), "未映射键的长按重复也要冒泡（不得与首次按下不一致）");
+
+    // 未映射键没有 VK 可发，全程不该产生任何远程按键
+    QCOMPARE(keys.count(), 0);
+
+    // 对照组：已映射的键长按**要**被吞掉（远端由被控端系统自己产生重复）
+    QKeyEvent mapped(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, QString(), true);
+    QCoreApplication::sendEvent(&renderer, &mapped);
+    QVERIFY2(mapped.isAccepted(), "已映射键的长按重复应当就地吞掉");
+    QCOMPARE(keys.count(), 0);
 }
 
 void TestRenderer::releaseAllPressedIsIdempotent()

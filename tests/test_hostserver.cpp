@@ -39,6 +39,10 @@ private slots:
     // listen() 契约：同实例改端口重监听得真的换过去；失败要给出可行动的原因
     void listenOnNewPortRebinds();
     void listenFailureReportsPortInUse();
+
+    // 未认证连接的两道门：瞬时上限 + 握手超时
+    void unauthenticatedConnectionsAreCapped();
+    void handshakeTimeoutDropsSilentConnection();
 };
 
 namespace {
@@ -558,8 +562,77 @@ void TestHostServer::successfulAuthClearsBackoff()
     delete ok.session;
 }
 
+// 未认证连接不能无限堆 —— 它们既不在 sessions_（心跳判死看不见），也不占 maxClients_ 名额。
+// 判据：超过 maxPendingAuth() 的那条「连上就被掐」，而且这**不算**「认证被拒」（语义不同，
+// 混在一起会让上层把扫描流量统计成「有人输错口令」）。
+void TestHostServer::unauthenticatedConnectionsAreCapped()
+{
+    lanrdp::HostServer host(QStringLiteral("pw"));
+    host.setMaxClients(2);
+    host.setMaxPendingAuth(3);
+    QCOMPARE(host.maxPendingAuth(), 3);
+    QVERIFY(host.listen(0));
+
+    // 3 条只连不握手：正好占满未认证名额
+    QVector<QTcpSocket *> silent;
+    for (int i = 0; i < 3; ++i) {
+        auto *s = new QTcpSocket();
+        s->connectToHost(QHostAddress::LocalHost, host.port());
+        QVERIFY(s->waitForConnected(3000));
+        silent.append(s);
+    }
+    QTRY_COMPARE(host.pendingAuthCount(), 3);
+    for (QTcpSocket *s : silent)
+        QCOMPARE(s->state(), QAbstractSocket::ConnectedState);
+
+    // 第 4 条超上限：必须被立刻断开
+    int rejected = 0;
+    QObject::connect(&host, &lanrdp::HostServer::clientRejected,
+                     [&rejected]() { ++rejected; });
+
+    QTcpSocket extra;
+    extra.connectToHost(QHostAddress::LocalHost, host.port());
+    extra.waitForConnected(2000);   // 被立刻掐掉时这里可能就是 false，两种都接受
+
+    QTRY_COMPARE(extra.state(), QAbstractSocket::UnconnectedState);
+    QCOMPARE(rejected, 0);                 // 不是「口令错」，也不是「满员被拒」
+    QCOMPARE(host.sessions().size(), 0);   // 一条都没进池
+    QCOMPARE(host.pendingAuthCount(), 3);  // 僵尸仍在（还没到超时），但名额没被撑爆
+
+    qDeleteAll(silent);
+}
+
+// 「连上却不握手」= 僵尸：必须被超时放掉；同一时刻正常握手的连接不能被误伤。
+void TestHostServer::handshakeTimeoutDropsSilentConnection()
+{
+    lanrdp::HostServer host(QStringLiteral("pw"));
+    host.setHandshakeTimeoutMs(800);
+    QCOMPARE(host.handshakeTimeoutMs(), 800);
+    QVERIFY(host.listen(0));
+
+    QTcpSocket silent;
+    silent.connectToHost(QHostAddress::LocalHost, host.port());
+    QVERIFY(silent.waitForConnected(3000));
+
+    // 同时来一个正常客户端：它要能在超时窗口内握手成功
+    TestClient ok = connectClient(host.port());
+    QVERIFY(ok.sock);
+    QTRY_COMPARE(host.sessions().size(), 1);
+    QCOMPARE(host.pendingAuthCount(), 1);   // 未出结论的只剩那条静默的
+
+    // 静默连接必须被断开（abort，不等对端 FIN）
+    QTRY_COMPARE(silent.state(), QAbstractSocket::UnconnectedState);
+
+    // 已认证的连接不受影响，pending 记账也归零
+    QCOMPARE(host.sessions().size(), 1);
+    QCOMPARE(ok.sock->state(), QAbstractSocket::ConnectedState);
+    QTRY_COMPARE(host.pendingAuthCount(), 0);
+
+    delete ok.auth;
+    delete ok.session;
+}
+
 // 同一实例、不同端口再 listen：必须真的换到新端口。
-//
 // 缺陷形态是「已监听就直接 return true」—— 新端口被静默丢掉，现象是
 // 「旧端口还能连、新端口连不上」，很容易被误判成「防火墙拦了」。
 void TestHostServer::listenOnNewPortRebinds()

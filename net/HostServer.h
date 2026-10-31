@@ -41,6 +41,31 @@ public:
     void setMaxClients(int max) { maxClients_ = max; }
     int  maxClients() const { return maxClients_; }
 
+    // 未认证连接（已 accept、握手未出结论）的上限。
+    //
+    // 默认自动跟随 = 2 × maxClients；显式 set 则覆盖。超限的连接**直接断开**：
+    // 不建 Session、不发 DENY、也**不**计入失败退避 —— 它与「口令错」「满员」是三种
+    // 不同语义，混在一起会让上层把扫描流量统计成「有人输错口令」。
+    //
+    // 为什么必须有这道门：未认证会话既不在 sessions_（心跳判死只遍历池子，看不见它），
+    // 也不占 maxClients_ 名额（那只数已认证的）⇒ 对端只要连着不说话，就能一直堆。
+    void setMaxPendingAuth(int max) { maxPendingAuthOverride_ = max; }
+    int  maxPendingAuth() const
+    {
+        return maxPendingAuthOverride_ > 0 ? maxPendingAuthOverride_ : 2 * maxClients_;
+    }
+
+    // 握手超时（默认 10000 ms，与客户端判「连上却没握手」的阈值对齐）：
+    // 连接建立后这么久还不出结论就 abort。与上限配合 —— 上限挡住瞬时洪峰，
+    // 超时负责把「连上不说话」的僵尸放掉，两者缺一都还能被慢速堆积打穿。
+    static constexpr int kDefaultHandshakeTimeoutMs = 10000;
+
+    void setHandshakeTimeoutMs(int ms) { handshakeTimeoutMs_ = ms; }
+    int  handshakeTimeoutMs() const { return handshakeTimeoutMs_; }
+
+    // 当前「已 accept、握手未出结论」的连接数（诊断与测试用）。
+    int pendingAuthCount() const { return pendingAuth_.size(); }
+
     QVector<Session *> sessions() const { return sessions_; }
 
     // 踢出控制端。dropClient 按**会话 id** 断开指定会话（id 不在池中则安全 no-op）；
@@ -101,7 +126,12 @@ private:
     QTimer           *heartbeatTimer_ = nullptr;
     QString           password_;
     QVector<Session *> sessions_;
+    // 已 accept、握手未出结论的会话。只在 onNewConnection 里加入，
+    // 由 removeSession / 认证成功两条路径移出（覆盖拒绝、超时、断线全部结局）。
+    QVector<Session *> pendingAuth_;
     int               maxClients_ = 4;
+    int               maxPendingAuthOverride_ = 0;   // 0 = 自动（2 × maxClients）
+    int               handshakeTimeoutMs_ = kDefaultHandshakeTimeoutMs;
     int               heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
     int               deadTimeoutMs_       = kDefaultDeadTimeoutMs;
     AuthBackoff       backoff_;

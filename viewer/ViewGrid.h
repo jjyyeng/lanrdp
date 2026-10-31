@@ -71,15 +71,14 @@ public:
 
     // ---- 选中（「点哪一格就操作哪一格」）----
     // 默认第 0 格；越界自动钳到 [0, count-1]。选中只是视图状态，不改变任何连接。
+    // ⚠️ 「点击 → 选中」的接线在 `RemoteView::activated`（MainWindow 收到后调
+    // setSelectedIndex）。本类**不再**自己监听鼠标：格子被画面控件与悬浮条铺满，
+    // 装在格子上的过滤器永远收不到点击（从前那段分支是不可达的死代码）。
     int  selectedIndex() const { return selected_; }
     void setSelectedIndex(int index);
 
 signals:
     void selectedChanged(int index);
-
-protected:
-    // 旁观点击：记下「用户在操作哪一格」，**不消费**事件。
-    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void relayout();

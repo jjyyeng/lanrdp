@@ -39,6 +39,12 @@ private slots:
     void h264FailureSwitchesToRawAndStopsRetrying();
     void codecFallbackIsEmittedExactlyOnce();
     void reselectingH264AfterFallbackRetries();
+
+    // 多屏：换输出必须强制 IDR、同值不去抖、换屏不打断流
+    void switchingOutputRequestsKeyframe();
+    void switchingToSameOutputIsNoop();
+    void requestKeyframeIsConsumedByNextFrame();
+    void switchingOutputKeepsFramesFlowing();
 };
 
 namespace {
@@ -612,6 +618,154 @@ void TestStreamer::reselectingH264AfterFallbackRetries()
     streamer.setCodec(lanrdp::StreamCodec::RawFrames);   // 先显式回裸帧（模拟用户取消勾选）
     streamer.setCodec(lanrdp::StreamCodec::H264);        // 再勾上
     QTRY_VERIFY_WITH_TIMEOUT(streamer.h264Active(), 5000);
+    streamer.stop();
+}
+
+// ---- 多屏：换输出 ----
+
+// 换屏必须让**下一帧**成为关键帧。
+//
+// 为什么不能只靠「分辨率变了编码器会重建」：两块屏分辨率相同时编码器根本不重建，
+// 换屏后的第一帧是 P 帧 ⇒ 控制端花屏到下一个自然 IDR（默认 GOP 2 s）。
+void TestStreamer::switchingOutputRequestsKeyframe()
+{
+    QTcpServer  server;
+    QTcpSocket  client;
+    QTcpSocket *serverSide = makeLoopbackServerSide(&server, &client);
+    QVERIFY(serverSide != nullptr);
+    lanrdp::Session session(serverSide);
+
+    QByteArray received;
+    QObject::connect(&client, &QTcpSocket::readyRead,
+                     [&received, &client]() { received.append(client.readAll()); });
+
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([](QImage *out) {
+        *out = makeImage(64, 48);
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::H264);
+    streamer.addTarget(&session);
+    streamer.start();
+
+    // 先跑进稳态：编码器热身完毕，开局那次「新观看者必须 IDR」已被消费掉。
+    QTRY_VERIFY_WITH_TIMEOUT(!received.isEmpty(), 5000);
+    if (!streamer.h264Active())
+        QSKIP("本机没有可用的 H.264 编码器，跳过");
+    QTRY_VERIFY_WITH_TIMEOUT(!streamer.keyframeRequested(), 10000);
+
+    streamer.setOutputIndex(1);
+    QVERIFY2(streamer.keyframeRequested(),
+             "换屏后必须重新出 IDR，否则控制端要花屏到下一个自然关键帧");
+    QCOMPARE(streamer.outputIndex(), 1);
+
+    streamer.stop();
+}
+
+// 切到**已经选中的**那块屏不该再重建抓屏器（用户连点两下不该反复抖）。
+void TestStreamer::switchingToSameOutputIsNoop()
+{
+    QTcpServer  server;
+    QTcpSocket  client;
+    QTcpSocket *serverSide = makeLoopbackServerSide(&server, &client);
+    QVERIFY(serverSide != nullptr);
+    lanrdp::Session session(serverSide);
+
+    QByteArray received;
+    QObject::connect(&client, &QTcpSocket::readyRead,
+                     [&received, &client]() { received.append(client.readAll()); });
+
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([](QImage *out) {
+        *out = makeImage(64, 48);
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::H264);
+    streamer.addTarget(&session);
+    streamer.start();
+
+    QTRY_VERIFY_WITH_TIMEOUT(!received.isEmpty(), 5000);
+    if (!streamer.h264Active())
+        QSKIP("本机没有可用的 H.264 编码器，跳过");
+
+    streamer.setOutputIndex(0);
+    QTRY_VERIFY_WITH_TIMEOUT(!streamer.keyframeRequested(), 10000);
+    streamer.setOutputIndex(0);   // 同一个值
+    QVERIFY2(!streamer.keyframeRequested(), "选中的还是同一块屏，不该再强制一次 IDR");
+
+    streamer.stop();
+}
+
+// requestKeyframe() 是「一次性」的：下一帧编出来之后必须自动清掉，
+// 否则每一帧都是 IDR，码率会炸。
+void TestStreamer::requestKeyframeIsConsumedByNextFrame()
+{
+    QTcpServer  server;
+    QTcpSocket  client;
+    QTcpSocket *serverSide = makeLoopbackServerSide(&server, &client);
+    QVERIFY(serverSide != nullptr);
+    lanrdp::Session session(serverSide);
+
+    QByteArray received;
+    QObject::connect(&client, &QTcpSocket::readyRead,
+                     [&received, &client]() { received.append(client.readAll()); });
+
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([](QImage *out) {
+        *out = makeImage(64, 48);
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::H264);
+    streamer.addTarget(&session);
+    streamer.start();
+
+    QTRY_VERIFY_WITH_TIMEOUT(!received.isEmpty(), 5000);
+    if (!streamer.h264Active())
+        QSKIP("本机没有可用的 H.264 编码器，跳过");
+    QTRY_VERIFY_WITH_TIMEOUT(!streamer.keyframeRequested(), 10000);
+
+    streamer.requestKeyframe();
+    QVERIFY(streamer.keyframeRequested());
+    QTRY_VERIFY_WITH_TIMEOUT(!streamer.keyframeRequested(), 5000);
+
+    streamer.stop();
+}
+
+// 换屏不能把流打断：裸帧路径下换完之后必须继续有帧到达
+// （抓屏器被作废，下个 tick 要能自己重建回来）。
+void TestStreamer::switchingOutputKeepsFramesFlowing()
+{
+    QTcpServer  server;
+    QTcpSocket  client;
+    QTcpSocket *serverSide = makeLoopbackServerSide(&server, &client);
+    QVERIFY(serverSide != nullptr);
+    lanrdp::Session session(serverSide);
+
+    QByteArray received;
+    QObject::connect(&client, &QTcpSocket::readyRead,
+                     [&received, &client]() { received.append(client.readAll()); });
+
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([](QImage *out) {
+        *out = makeImage(64, 48);
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::RawFrames);
+    streamer.addTarget(&session);
+    streamer.start();
+
+    const int frameBytes = lanrdp::kRawFrameHeaderSize + 64 * 48 * 4;
+    QTRY_VERIFY_WITH_TIMEOUT(received.size() >= frameBytes, 5000);
+
+    const qsizetype before = received.size();
+    streamer.setOutputIndex(1);
+    QTRY_VERIFY_WITH_TIMEOUT(received.size() >= before + 2 * frameBytes, 5000);
+    QVERIFY(streamer.isRunning());
+
     streamer.stop();
 }
 

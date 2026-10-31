@@ -86,7 +86,11 @@ QByteArray extractParameterSets(const QByteArray &data)
 
 bool containsNalType(const QByteArray &data, int nalType)
 {
-    for (int i = 0; i + 4 < data.size(); ++i) {
+    // 上界只要求「还放得下最短的起始码（3 字节）」—— hasStartCodeAt 自己会校验
+    // 3 字节 / 4 字节两种形态与越界。原来写 i + 4 < size，把末尾 4 字节窗口排除了：
+    // 那里要凑出「起始码 + NAL 头」本来也放不下 NAL 头，所以结果一样，
+    // 但边界比必要更严，容易被后来人当 bug 修（反过来改坏）。
+    for (int i = 0; i + 3 <= data.size(); ++i) {
         if (hasStartCodeAt(data, i)) {
             const int headerOffset = i + (static_cast<quint8>(data.at(i + 2)) == 1 ? 3 : 4);
             if (headerOffset < data.size()

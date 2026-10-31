@@ -12,6 +12,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
+#include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -35,6 +36,7 @@
 #include "net/Session.h"
 #include "protocol/FileTransfer.h"
 #include "protocol/Frame.h"
+#include "protocol/ScreenControl.h"
 #include "protocol/ScreenFrame.h"
 #include "viewer/EmptyState.h"
 #include "viewer/RemoteView.h"
@@ -79,6 +81,12 @@ private slots:
     void overlayBarDoesNotForwardInputToRemote();
     void viewMenuTogglesOverlayBar();
     void statusBarIsIndependentOfOverlayBar();
+    // 【设置】里的音频开关：可勾选、默认开、切换不崩（此刻没有任何连接 ⇒ 不该碰设备）
+    void settingsMenuHasAudioSwitch();
+
+    // 多屏：单屏用户界面零变化；多屏时条上多一颗【屏幕】，菜单项与屏列表一致
+    void screenButtonAppearsOnlyWithMultipleScreens();
+    void screenMenuListsEveryMonitorAndMarksCurrent();
 
     // 三个对话框
     void dialogsRoundTripTheirConfig();
@@ -90,6 +98,10 @@ private slots:
     void passwordRevealToggleSwitchesEchoMode();
     void hostDialogRejectsWeakPassword();
     void connectDialogRejectsWeakPassword();
+    // 地址为空与口令不合规是同一类事：提示必须是同一个位置的同一条红字
+    void connectDialogRejectsEmptyAddressWithTheSameRedLabel();
+    // 空态大图标要跟随屏幕 DPR 重画（跨缩放比屏拖动后不发糊）
+    void emptyStateIconFollowsDevicePixelRatio();
     void startHostRejectsWeakPassword();
     void settingsDialogHoldsTheGlobalSwitches();
     // 被控端口令不得为空
@@ -636,6 +648,26 @@ void TestMainWindowUi::overlayBarDoesNotForwardInputToRemote()
 
 // 条会遮住画面顶部约 30 逻辑像素（远端窗口的标题栏 / 最大化按钮可能
 // 因此点不到），所以必须留一个收起入口。Ctrl+L 是早就有的肌肉记忆。
+void TestMainWindowUi::settingsMenuHasAudioSwitch()
+{
+    MainWindow w(testLogPath());
+    w.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&w));
+
+    auto *audio = w.findChild<QAction *>(QStringLiteral("actionReceiveAudio"));
+    QVERIFY2(audio, "【设置】菜单里应当有「接收对方的声音」");
+    QVERIFY2(audio->isCheckable(), "开关项应当可勾选");
+    QVERIFY2(audio->isChecked(),
+             "默认应当接收声音 —— 默认关会变成「明明连着却听不见」这种无从解释的现象");
+    QVERIFY2(!audio->statusTip().isEmpty(), "全局开关也应当有一句说明");
+
+    // 切两次都不许崩：此刻没有任何连接，切换不该去碰声卡（碰了就会在没设备的机器上炸）
+    audio->trigger();
+    QVERIFY(!audio->isChecked());
+    audio->trigger();
+    QVERIFY(audio->isChecked());
+}
+
 void TestMainWindowUi::viewMenuTogglesOverlayBar()
 {
     MainWindow w(testLogPath());
@@ -785,8 +817,11 @@ void TestMainWindowUi::dialogsAreDarkToo()
 
 // 防火墙只在某个端口**第一次**被监听时问一次：用户当时点了跳过，系统会生成
 // 阻止规则且不再提示，而程序这边看不出任何异常（本机 listen 照常成功，只是外部
-// 连不进来）。所以「该勾哪个网络」这句话必须留在对话框里 —— 它是这个故障
-// 唯一的事前防线（不做自动加规则：那要提权，而这辈子只点一两次）。
+// 连不进来）。所以「连不上就去防火墙放行」这句话必须留在对话框里 —— 它是这个
+// 故障唯一的事前防线（不做自动加规则：那要提权，而这辈子只点一两次）。
+//
+// 文案**不提网络类型**：弹窗里「专用 / 公用」两项勾哪个取决于用户的网卡被判成
+// 哪一类，指错方向等于没放行。反向断言就是为此设的 —— 别把「专用网络」写回去。
 void TestMainWindowUi::hostDialogExplainsFirewallPrompt()
 {
     lanrdp::HostConfigDialog host(lanrdp::HostConfigDialog::Config{}, nullptr);
@@ -797,8 +832,10 @@ void TestMainWindowUi::hostDialogExplainsFirewallPrompt()
             hint = l->text();
     }
     QVERIFY2(!hint.isEmpty(), "开始监听对话框里应当有防火墙提示");
-    QVERIFY2(hint.contains(QStringLiteral("专用网络")),
-             qPrintable(QStringLiteral("提示没说清该勾哪个网络：") + hint));
+    QVERIFY2(hint.contains(QStringLiteral("放行")),
+             qPrintable(QStringLiteral("提示没说要放行：") + hint));
+    QVERIFY2(!hint.contains(QStringLiteral("专用网络")),
+             qPrintable(QStringLiteral("又去指网络类型了（网卡归属不定，指哪边都可能错）：") + hint));
 }
 
 // 接收目录不能显示成空框：真正落盘时会退到系统「下载」目录（MainWindow::receiveDir()），
@@ -908,7 +945,7 @@ void TestMainWindowUi::connectDialogRejectsWeakPassword()
 {
     lanrdp::ConnectDialog dlg(lanrdp::ConnectDialog::Config{}, nullptr);
     auto *pw   = dlg.findChild<QLineEdit *>(QStringLiteral("connectPasswordEdit"));
-    auto *hint = dlg.findChild<QLabel *>(QStringLiteral("connectPasswordError"));
+    auto *hint = dlg.findChild<QLabel *>(QStringLiteral("connectErrorHint"));
     auto *box  = dlg.findChild<QDialogButtonBox *>();
     QVERIFY2(pw && hint && box, "口令框 / 报错行 / 按钮盒都应存在");
 
@@ -928,6 +965,59 @@ void TestMainWindowUi::connectDialogRejectsWeakPassword()
     QVERIFY2(hint->isHidden(), "一开始改就该把上一轮的报错收起来");
     box->button(QDialogButtonBox::Ok)->click();
     QVERIFY2(accepted == 1, "合规口令应当放行");
+}
+
+// 地址为空与口令不合规是同一类事（「这一栏没填对」），提示也该是同一个位置的同一条红字。
+// 原来的做法是临时改 placeholder —— 一次性、且看起来像系统占位符而不是报错，
+// 与旁边的红字形成两种风格。
+void TestMainWindowUi::connectDialogRejectsEmptyAddressWithTheSameRedLabel()
+{
+    lanrdp::ConnectDialog dlg(lanrdp::ConnectDialog::Config{}, nullptr);
+    auto *host = dlg.findChild<QLineEdit *>(QStringLiteral("peerHostEdit"));
+    auto *hint = dlg.findChild<QLabel *>(QStringLiteral("connectErrorHint"));
+    auto *box  = dlg.findChild<QDialogButtonBox *>();
+    QVERIFY2(host && hint && box, "地址框 / 报错行 / 按钮盒都应存在");
+    QVERIFY2(hint->isHidden(), "报错行平时不该出现");
+
+    int accepted = 0;
+    QObject::connect(&dlg, &QDialog::accepted, &dlg, [&accepted] { ++accepted; });
+
+    host->setText(QString());
+    box->button(QDialogButtonBox::Ok)->click();
+    QVERIFY2(accepted == 0, "地址为空不能放行");
+    QVERIFY2(!hint->isHidden(), "地址为空应当显示红字");
+    QVERIFY2(hint->text().contains(QStringLiteral("地址")), qPrintable(hint->text()));
+    QVERIFY2(host->placeholderText() != QStringLiteral("请填写对方地址"),
+             "不该再用改 placeholder 的方式提示：一次性，而且会被误认成占位符");
+
+    // 与口令栏同一套行为：一动就收起红字
+    host->setText(QStringLiteral("127.0.0.1"));
+    QVERIFY2(hint->isHidden(), "开始改地址就该把红字收起来");
+
+    // 光「显示出来」还不够 —— 颜色由主题 QSS 的 #connectErrorHint 规则决定。
+    // 少了那条规则，上面几条断言照样全绿，而这一行会静默退回正文色：
+    // 用户看到的是一条灰色说明，而不是「填错了」。把它钉死在 danger 上。
+    dlg.setStyleSheet(lanrdp::theme::applicationStyleSheet());
+    hint->ensurePolished();
+    QCOMPARE(hint->palette().color(QPalette::WindowText), lanrdp::theme::colors().danger);
+}
+
+// 空态大图标是按**构造时**的 DPR 栅格化的位图：窗口拖到另一块缩放比不同的屏幕上
+// （100% ↔ 150%）不会自己重画，于是发糊。这里能验的是「DPR 变化事件到来时图标被
+// 重画且仍与控件 DPR 一致」；真实发糊只能靠肉眼在两块屏之间拖一次。
+void TestMainWindowUi::emptyStateIconFollowsDevicePixelRatio()
+{
+    lanrdp::EmptyState empty(nullptr);
+    auto *icon = empty.findChild<QLabel *>(QStringLiteral("emptyIcon"));
+    QVERIFY2(icon && !icon->pixmap().isNull(), "空态大图标应当就位");
+    QVERIFY2(qFuzzyCompare(icon->pixmap().devicePixelRatio(), empty.devicePixelRatioF()),
+             "图标位图的 DPR 应与控件当前 DPR 一致");
+
+    QEvent dprEvent(QEvent::DevicePixelRatioChange);
+    QCoreApplication::sendEvent(&empty, &dprEvent);
+    QVERIFY2(!icon->pixmap().isNull(), "DPR 变化后必须重画，不能变成空图");
+    QVERIFY2(qFuzzyCompare(icon->pixmap().devicePixelRatio(), empty.devicePixelRatioF()),
+             "重画后仍应与控件 DPR 一致");
 }
 
 // startHost() 里的校验是**兜底**：对话框已经拦过一道，但命令行（--host）和
@@ -2966,6 +3056,130 @@ void TestMainWindowUi::ignoresSessionStoreWhenPathIsEmpty()
 {
     MainWindow w(testLogPath());
     QVERIFY2(w.hostUsesH264(), "不接配置时应当保持内置默认值");
+}
+
+// ---- 多屏：条上的【屏幕】----
+
+namespace {
+
+lanrdp::ScreenInfo uiScreen(qint32 x, quint32 w, quint32 h, bool primary)
+{
+    lanrdp::ScreenInfo s;
+    s.x       = x;
+    s.width   = w;
+    s.height  = h;
+    s.primary = primary;
+    return s;
+}
+
+lanrdp::ScreenList singleScreenList()
+{
+    lanrdp::ScreenList list;
+    list.screens.append(uiScreen(0, 3840, 2160, true));
+    list.current = 0;
+    return list;
+}
+
+lanrdp::ScreenList dualScreenList(quint8 current = 1)
+{
+    lanrdp::ScreenList list;
+    list.screens.append(uiScreen(0, 3840, 2160, true));
+    list.screens.append(uiScreen(-1920, 1920, 1080, false));
+    list.current = current;
+    return list;
+}
+
+} // namespace
+
+// 单屏被控端上，控制端界面必须与没有这项功能时**一模一样**：
+// 多一颗按钮在窄格里会挤掉右侧出口（一控多 2×2 时每格只有半个窗口宽）。
+void TestMainWindowUi::screenButtonAppearsOnlyWithMultipleScreens()
+{
+    MainWindow w(testLogPath());
+
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    QVERIFY(host.listen(0));
+
+    w.startConnect(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QTRY_VERIFY(w.clientReady());
+
+    auto *view = w.viewAt(0);
+    QVERIFY(view);
+
+    // 还没收到屏列表 ⇒ 隐藏
+    QVERIFY2(!shown(view->screenButton()), "没收到屏列表时不该出现【屏幕】");
+
+    lanrdp::Session *peer = host.sessions().at(0);
+    QVERIFY(peer);
+
+    // 单屏 ⇒ 仍然隐藏
+    peer->sendFrame(static_cast<quint8>(lanrdp::FrameType::ScreenList),
+                    lanrdp::encodeScreenList(singleScreenList()));
+    QTRY_VERIFY(view->connection()->hasScreenList());
+    QTest::qWait(50);
+    QVERIFY2(!shown(view->screenButton()), "只有一块屏时不该出现【屏幕】（界面零变化）");
+
+    // 双屏 ⇒ 出现
+    peer->sendFrame(static_cast<quint8>(lanrdp::FrameType::ScreenList),
+                    lanrdp::encodeScreenList(dualScreenList()));
+    QTRY_VERIFY_WITH_TIMEOUT(shown(view->screenButton()), 3000);
+    QVERIFY2(!view->screenButton()->accessibleName().isEmpty(),
+             "纯图标按钮必须有无障碍名字");
+    QVERIFY2(!view->screenButton()->toolTip().isEmpty(), "纯图标按钮必须有悬停提示");
+}
+
+// 菜单项 = 屏列表现状：每块屏一条，当前那块打勾，点下去发的是**请求**。
+// 抽成 createScreenMenu() 是为了能直接检查一个「没在模态弹出」的菜单。
+void TestMainWindowUi::screenMenuListsEveryMonitorAndMarksCurrent()
+{
+    MainWindow w(testLogPath());
+
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    QVERIFY(host.listen(0));
+
+    w.startConnect(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QTRY_VERIFY(w.clientReady());
+
+    auto *view = w.viewAt(0);
+    QVERIFY(view);
+    lanrdp::Session *peer = host.sessions().at(0);
+    QVERIFY(peer);
+
+    peer->sendFrame(static_cast<quint8>(lanrdp::FrameType::ScreenList),
+                    lanrdp::encodeScreenList(dualScreenList(/*current=*/1)));
+    QTRY_VERIFY(view->connection()->hasScreenList());
+
+    QMenu *menu = w.createScreenMenu(view);
+    QVERIFY(menu != nullptr);
+
+    const QList<QAction *> actions = menu->actions();
+    QCOMPARE(actions.size(), 2);
+    // 文案里必须能读出分辨率（两块屏长得一样时，序号是唯一可分辨的信息，
+    // 但分辨率才是用户认屏的依据）
+    QVERIFY2(actions.at(0)->text().contains(QStringLiteral("3840"))
+                 && actions.at(0)->text().contains(QStringLiteral("2160")),
+             qPrintable(actions.at(0)->text()));
+    QVERIFY2(actions.at(1)->text().contains(QStringLiteral("1920"))
+                 && actions.at(1)->text().contains(QStringLiteral("1080")),
+             qPrintable(actions.at(1)->text()));
+    // 当前那一块打勾
+    QVERIFY2(!actions.at(0)->isChecked(), "当前是屏 2，屏 1 不该打勾");
+    QVERIFY2(actions.at(1)->isChecked(), "当前是屏 2，必须打勾");
+
+    // 点第一项 ⇒ 往对端发一次 SCREEN_SELECT(0)
+    QVector<quint8> requested;
+    QObject::connect(peer, &lanrdp::Session::frameReceived, peer,
+                     [&requested](const lanrdp::Frame &f) {
+                         if (f.type != static_cast<quint8>(lanrdp::FrameType::ScreenSelect))
+                             return;
+                         if (auto idx = lanrdp::decodeScreenSelect(f.payload))
+                             requested.append(*idx);
+                     });
+    actions.at(0)->trigger();
+    QTRY_VERIFY_WITH_TIMEOUT(!requested.isEmpty(), 3000);
+    QCOMPARE(requested.last(), quint8(0));
+
+    delete menu;
 }
 
 QTEST_MAIN(TestMainWindowUi)

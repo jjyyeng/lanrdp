@@ -61,7 +61,141 @@ QString unsupportedFormatMessage(unsigned int fmt)
         .arg(QString::fromLatin1(formatName(fmt)));
 }
 
+// 一块候选输出（枚举结果）。**每条各自持有一份 adapter / output 引用** ——
+// 同一张显卡上的两块屏会共享 adapter 指针，共用一份引用时「释放未选中的」
+// 就会把选中那条手里的 adapter 一起放掉。
+struct OutputEntry
+{
+    IDXGIAdapter1 *adapter = nullptr;
+    IDXGIOutput   *output  = nullptr;
+    RECT           rect{};
+    bool           primary = false;
+    QString        adapterName;
+    QString        outputName;
+};
+
+// Win32 主显示器的桌面矩形（取不到时返回全零，调用方按「没有主屏」处理）。
+RECT primaryMonitorRect()
+{
+    RECT     primary{};
+    POINT    origin{0, 0};
+    HMONITOR monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(MONITORINFO);
+    if (monitor && GetMonitorInfoW(monitor, &mi))
+        primary = mi.rcMonitor;
+    return primary;
+}
+
+bool sameRect(const RECT &a, const RECT &b)
+{
+    return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+}
+
+// **唯一**的输出来源：`enumerateOutputs()`（界面上「屏 1/2」的含义）与
+// `init()`（真正抓哪块）都从这里取，顺序天然一致。
+//
+// 过滤条件 = 非软件适配器 + AttachedToDesktop：休眠 / 被禁用 / 虚拟显示器的空输出
+// 不进列表，否则界面上会多出一项点开就黑屏的「屏 3」。
+QVector<OutputEntry> collectOutputs(IDXGIFactory1 *factory, const RECT &primary)
+{
+    QVector<OutputEntry> entries;
+    const bool           hasPrimary = primary.right > primary.left;
+
+    for (UINT ai = 0;; ++ai) {
+        IDXGIAdapter1 *adapter = nullptr;
+        // 只与 DXGI_ERROR_NOT_FOUND 比较是不够的：其它失败（如 E_ACCESSDENIED）
+        // 会把 adapter 留成 nullptr，紧接着的 GetDesc1 就是空指针解引用。
+        const HRESULT ah = factory->EnumAdapters1(ai, &adapter);
+        if (FAILED(ah) || adapter == nullptr)
+            break;
+
+        DXGI_ADAPTER_DESC1 adapterDesc{};
+        if (FAILED(adapter->GetDesc1(&adapterDesc))) {
+            adapter->Release();
+            continue;   // 这个适配器读不出描述（驱动异常），跳过而不是崩
+        }
+        if ((adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+            adapter->Release();
+            continue;   // 软件适配器（远程桌面 / 虚拟屏）不参与
+        }
+        const QString adapterName = QString::fromWCharArray(adapterDesc.Description);
+
+        for (UINT oi = 0;; ++oi) {
+            IDXGIOutput *output = nullptr;
+            // 同上：非 NOT_FOUND 的失败也会留下空指针。
+            const HRESULT oh = adapter->EnumOutputs(oi, &output);
+            if (FAILED(oh) || output == nullptr)
+                break;
+
+            DXGI_OUTPUT_DESC outputDesc{};
+            if (FAILED(output->GetDesc(&outputDesc)) || !outputDesc.AttachedToDesktop) {
+                output->Release();
+                continue;   // 读不出描述 / 未附着桌面的输出，跳过
+            }
+
+            OutputEntry entry;
+            entry.adapter     = adapter;
+            entry.output      = output;
+            entry.rect        = outputDesc.DesktopCoordinates;
+            entry.primary     = hasPrimary && sameRect(entry.rect, primary);
+            entry.adapterName = adapterName;
+            entry.outputName  = QString::fromWCharArray(outputDesc.DeviceName);
+            entries.append(entry);
+
+            // 这条把枚举引用转交给了 entry，给下一条补一份。
+            adapter->AddRef();
+        }
+
+        adapter->Release();   // 归还本次枚举的引用
+    }
+    return entries;
+}
+
+void releaseEntries(QVector<OutputEntry> &entries, int keepIndex = -1)
+{
+    for (int i = 0; i < entries.size(); ++i) {
+        if (i == keepIndex)
+            continue;
+        if (entries[i].output)
+            entries[i].output->Release();
+        if (entries[i].adapter)
+            entries[i].adapter->Release();
+        entries[i].output  = nullptr;
+        entries[i].adapter = nullptr;
+    }
+}
+
 } // namespace
+
+QVector<MonitorInfo> ScreenCapturer::enumerateOutputs()
+{
+    QVector<MonitorInfo> monitors;
+
+    IDXGIFactory1 *factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, reinterpret_cast<void **>(&factory)))
+        || factory == nullptr)
+        return monitors;
+
+    QVector<OutputEntry> entries = collectOutputs(factory, primaryMonitorRect());
+    factory->Release();
+
+    monitors.reserve(entries.size());
+    for (int i = 0; i < entries.size(); ++i) {
+        MonitorInfo info;
+        info.index = i;
+        info.rect  = QRect(static_cast<int>(entries.at(i).rect.left),
+                          static_cast<int>(entries.at(i).rect.top),
+                          static_cast<int>(entries.at(i).rect.right - entries.at(i).rect.left),
+                          static_cast<int>(entries.at(i).rect.bottom - entries.at(i).rect.top));
+        info.isPrimary = entries.at(i).primary;
+        info.name      = entries.at(i).outputName;
+        monitors.append(info);
+    }
+
+    releaseEntries(entries);
+    return monitors;
+}
 
 bool ScreenCapturer::isSupportedFormat(unsigned int dxgiFormat)
 {
@@ -75,7 +209,7 @@ ScreenCapturer::~ScreenCapturer()
     shutdown();
 }
 
-bool ScreenCapturer::init(QString *error, bool *recoverable)
+bool ScreenCapturer::init(QString *error, bool *recoverable, int preferredOutputIndex)
 {
     shutdown();
     // 默认「真错」；只有明确属于「等会儿可能行」的分支才置 true。
@@ -90,93 +224,45 @@ bool ScreenCapturer::init(QString *error, bool *recoverable)
         return false;
     }
 
-    // ---- 2. 选输出：优先匹配“主显示器”所在的输出 ----
+    // ---- 2. 选输出 ----
     // 机器上常存在虚拟显示适配器（ToDesk / Honor / Microsoft Remote Display 等），
     // 盲取第一个输出可能抓到虚拟屏或黑屏，因此以 Win32 的主显示器坐标为准。
-    RECT primary{};
-    {
-        POINT      origin{0, 0};
-        HMONITOR   monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
-        MONITORINFO mi{};
-        mi.cbSize = sizeof(MONITORINFO);
-        if (monitor && GetMonitorInfoW(monitor, &mi))
-            primary = mi.rcMonitor;
-    }
-
-    IDXGIAdapter1 *adapter = nullptr;
-    IDXGIOutput   *output  = nullptr;
-    QString        adapterName;
-    QString        outputName;
-    RECT           outputRect{};
-
-    auto findOutput = [&](bool wantPrimary) -> bool {
-        for (UINT ai = 0;; ++ai) {
-            IDXGIAdapter1 *candidate = nullptr;
-            // 只与 DXGI_ERROR_NOT_FOUND 比较是不够的：其它失败（如 E_ACCESSDENIED）
-            // 会把 candidate 留成 nullptr，紧接着的 candidate->GetDesc1 就是空指针解引用。
-            const HRESULT ah = factory->EnumAdapters1(ai, &candidate);
-            if (FAILED(ah) || candidate == nullptr)
-                break;
-
-            DXGI_ADAPTER_DESC1 adapterDesc{};
-            if (FAILED(candidate->GetDesc1(&adapterDesc))) {
-                candidate->Release();
-                continue;   // 这个适配器读不出描述（驱动异常），跳过而不是崩
-            }
-            const bool isSoftware = (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
-
-            bool matched = false;
-            if (!isSoftware) {
-                for (UINT oi = 0;; ++oi) {
-                    IDXGIOutput *candidateOutput = nullptr;
-                    // 同上：非 NOT_FOUND 的失败也会留下空指针。
-                    const HRESULT oh = candidate->EnumOutputs(oi, &candidateOutput);
-                    if (FAILED(oh) || candidateOutput == nullptr)
-                        break;
-
-                    DXGI_OUTPUT_DESC outputDesc{};
-                    if (FAILED(candidateOutput->GetDesc(&outputDesc))) {
-                        candidateOutput->Release();
-                        continue;   // 读不出描述的输出，跳过
-                    }
-
-                    const RECT &r = outputDesc.DesktopCoordinates;
-                    const bool primaryMatch =
-                        outputDesc.AttachedToDesktop && primary.right > primary.left
-                        && r.left == primary.left && r.top == primary.top
-                        && r.right == primary.right && r.bottom == primary.bottom;
-
-                    const bool accept = wantPrimary ? primaryMatch : outputDesc.AttachedToDesktop;
-                    if (accept) {
-                        adapter     = candidate;
-                        output      = candidateOutput;
-                        adapterName = QString::fromWCharArray(adapterDesc.Description);
-                        outputName  = QString::fromWCharArray(outputDesc.DeviceName);
-                        outputRect  = r;
-                        matched     = true;
-                        break;  // 保留引用，不 Release
-                    }
-                    candidateOutput->Release();
-                }
-            }
-
-            if (matched)
-                return true;
-            candidate->Release();
-        }
-        return false;
-    };
-
-    if (!findOutput(true))
-        findOutput(false);  // 找不到主显示器匹配时，退化为第一个已附着桌面的输出
-
+    QVector<OutputEntry> outputs = collectOutputs(factory, primaryMonitorRect());
     factory->Release();
 
-    if (!adapter || !output) {
+    if (outputs.isEmpty()) {
         setError(error, QStringLiteral("未找到可用的显示输出（显卡/显示器不可用）"));
-        if (adapter) adapter->Release();
         return false;
     }
+
+    // 选择顺序：显式指定的 index → 主屏 → 第一个。
+    // 指定的 index 越界（那块屏被拔掉 / 枚举顺序变了）时**回落**而不是报错：
+    // 切屏失败不该让整条链路黑屏，真实选中的 index 由 outputIndex() 报出去。
+    int chosen = -1;
+    if (preferredOutputIndex >= 0 && preferredOutputIndex < outputs.size()) {
+        chosen = preferredOutputIndex;
+    } else {
+        for (int i = 0; i < outputs.size(); ++i) {
+            if (outputs.at(i).primary) {
+                chosen = i;
+                break;
+            }
+        }
+        if (chosen < 0)
+            chosen = 0;
+    }
+
+    IDXGIAdapter1 *adapter     = outputs.at(chosen).adapter;
+    IDXGIOutput   *output      = outputs.at(chosen).output;
+    const QString  adapterName = outputs.at(chosen).adapterName;
+    const QString  outputName  = outputs.at(chosen).outputName;
+    const RECT     outputRect  = outputs.at(chosen).rect;
+    outputIndex_ = chosen;
+
+    // 未选中的条目必须把引用还回去；选中那条的两份引用转交给本对象
+    //（后面各失败路径与 shutdown() 会释放它们）。
+    releaseEntries(outputs, chosen);
+
 
     deviceInfo_ = QStringLiteral("%1 | %2 [%3,%4 %5x%6]")
                       .arg(adapterName,
@@ -290,6 +376,7 @@ void ScreenCapturer::shutdown()
     ready_  = false;
     width_  = 0;
     height_ = 0;
+    outputIndex_ = -1;
     monitorRect_ = QRect();
 }
 

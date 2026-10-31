@@ -96,10 +96,12 @@ public:
     void accept() override;
 
 private:
-    QLineEdit *host_          = nullptr;
-    QSpinBox  *port_          = nullptr;
-    QLineEdit *password_      = nullptr;
-    QLabel    *passwordError_ = nullptr;
+    QLineEdit *host_     = nullptr;
+    QSpinBox  *port_     = nullptr;
+    QLineEdit *password_ = nullptr;
+    // 地址为空 / 口令不合规共用**同一条**红字：两类错误都是「这一栏没填对」，
+    // 用两套提示（一个改 placeholder、一个常驻红字）会让人以为是两种不同的问题。
+    QLabel    *error_    = nullptr;
 };
 
 // 【设置…】：**本次运行内**的全局开关（不落盘、不跨会话，退出即恢复默认）。

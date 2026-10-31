@@ -1,7 +1,9 @@
 #pragma once
 
+#include "protocol/AudioChunk.h"
 #include "protocol/Frame.h"
 #include "protocol/InputEvent.h"
+#include "protocol/ScreenControl.h"
 
 #include <QElapsedTimer>
 #include <QObject>
@@ -144,6 +146,23 @@ public:
     // 关开关时上层应显式再调 `cancelReconnect()`（与旧 onAutoReconnectToggled 等价）。
     void setAutoReconnectEnabled(bool on) { autoReconnect_ = on; }
     bool autoReconnectEnabled() const { return autoReconnect_; }
+
+    // 最近一次收到的音频格式（**缓存**，不是开关状态）。
+    // 上层在「切格 / 打开音频开关」时用它把播放端按对的采样率起来 ——
+    // 否则一旦错过开局那一帧配置，就得等到对端换默认设备才会有下一帧。
+    bool        hasAudioFormat() const { return hasAudioFormat_; }
+    AudioFormat audioFormat() const { return audioFormat_; }
+
+    // ---- 多屏（协议 v5）----
+    // 被控端广播来的**权威状态**（屏列表 + 当前在看哪块）。本端只缓存，不改它 ——
+    // 「现在推的是哪块」由被控端说了算，见 protocol/ScreenControl.h 的分工说明。
+    // 每次重连都会清空（列表属于「那台机器」，不是这条连接的偏好）。
+    bool              hasScreenList() const { return hasScreenList_; }
+    const ScreenList &screenList() const { return screenList_; }
+
+    // 请求切到第 index 块屏。**只是请求** —— 真正生效与否看对端回的新 SCREEN_LIST。
+    // 未握手 / 序号越界返回 false（本地就拒掉，不浪费一次往返）。
+    bool selectScreen(int index);
     // 停掉在途退避并清零计数（关自动重连 / 用户断开时用）。
     void cancelReconnect();
 
@@ -170,6 +189,14 @@ signals:
     // 与上层统计口径必须用 sourceSize，否则会显示成缩小后的小尺寸。
     void frameReady(const QImage &image, qint64 bytes, const QSize &sourceSize);
     void clipboardReceived(const lanrdp::Frame &frame);  // 交给上层的剪贴板同步器
+
+    // 音频（协议 v4）：配置帧先于数据帧到达。非法载荷在 `handleFrame` 里静默丢弃，
+    // 不会发信号 —— 音频坏一块不值得把整条连接断掉。
+    void audioConfigReceived(const lanrdp::AudioFormat &format);
+    void audioDataReceived(qint64 tsMs, const QByteArray &pcm);
+    // 屏列表变了（含着「当前在看哪块」的变化）。界面按它决定条上那项显不显示、
+    // 勾在哪一条 —— 不做本地推测，一律以这一份为准。
+    void screenListChanged(const lanrdp::ScreenList &list);
     void connectionLost();                      // 连接断开 → 上层复位界面
     void inputSent(int kind);                   // 成功发出一帧输入
 
@@ -220,6 +247,10 @@ private:
     bool authRejected_            = false;
     bool inputEnabled_           = false;   // 全局键鼠开关（由上层注入）
     bool autoReconnect_          = true;
+    bool hasAudioFormat_         = false;   // 是否已收到过音频配置帧
+    AudioFormat audioFormat_;               // 最近一次的音频格式（见 hasAudioFormat）
+    bool        hasScreenList_   = false;   // 是否已收到过屏列表（重连即清空）
+    ScreenList  screenList_;                // 最近一次的屏列表 + 当前那块
     QSize displayBudget_;                   // 解码输出尺寸上限框（由窗口下发）
 
     QString lastHost_;

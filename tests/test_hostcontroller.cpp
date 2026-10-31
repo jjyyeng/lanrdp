@@ -19,9 +19,11 @@
 #endif
 
 #include "host/HostController.h"
+#include "host/ScreenCapturer.h"
 #include "net/Auth.h"
 #include "net/Session.h"
 #include "protocol/Frame.h"
+#include "protocol/ScreenControl.h"
 
 // 被控端宿主边界（host/HostController）的契约：监听 / 会话池快照 /
 // 输入令牌 / 统计查询。全部走**真实 loopback**，不打桩。
@@ -109,6 +111,14 @@ private slots:
     void previewIsGatedOnHostSide();
     void startStopRepeatedlyDoesNotCrash();
     void hostStaysResponsiveWhileStreaming();
+
+    // 音频采集线程的生命周期：没人听不开、stop() 必须收干净（退出程序不挂）
+    void audioCaptureFollowsClientsAndStopsWithHost();
+
+    // ---- 多屏：状态由被控端广播，选屏只是请求 ----
+    void screenListIsSentAfterAuth();
+    void screenSelectAlwaysAcknowledgedWithNewList();
+    void invalidScreenSelectDoesNotChangeOutput();
 };
 
 void TestHostController::startsAndStopsListening()
@@ -521,6 +531,167 @@ void TestHostController::hostStaysResponsiveWhileStreaming()
     }
 
     QVERIFY2(max < 500, qPrintable(QStringLiteral("推流期间被控端响应退化到 %1 ms").arg(max)));
+}
+
+// 音频采集线程的生命周期。
+//
+// 两条都要守：① 没人听的时候**不开采集**（loopback 是一条常跑的设备流，
+// 白占设备也白耗电）；② `stop()` 必须把线程收干净 —— 音频是「最容易把退出
+// 拖死」的那类新增线程（设备调用可能长阻塞）。
+void TestHostController::audioCaptureFollowsClientsAndStopsWithHost()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    QVERIFY2(!hc.audioCaptureRunning(), "没有控制端时不该开音频采集");
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    // 第一个控制端接入才起采集。没有音频设备的机器上它必然起不来 —— 那是环境事实。
+    QElapsedTimer up;
+    up.start();
+    while (!hc.audioCaptureRunning() && up.elapsed() < 2000)
+        QTest::qWait(50);
+    if (!hc.audioCaptureRunning())
+        QSKIP("本机没有可用的音频输出设备（采集线程起不来，只验停机路径）");
+
+    QElapsedTimer timer;
+    timer.start();
+    hc.stop();
+    const qint64 elapsed = timer.elapsed();
+
+    QVERIFY2(elapsed < 3000,
+             qPrintable(QStringLiteral("stop() 被音频线程拖住了 %1 ms").arg(elapsed)));
+    QVERIFY2(!hc.audioCaptureRunning(), "stop() 之后采集线程必须已经退出");
+    QVERIFY(!hc.isListening());
+}
+
+// ---- 多屏：状态由被控端广播，选屏只是请求 ----
+
+// 鉴权通过后必须**先**拿到一份权威状态，否则控制端连「有几块屏」都不知道，
+// 条上的【屏幕】入口无从显示。
+void TestHostController::screenListIsSentAfterAuth()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    QVector<lanrdp::ScreenList> lists;
+    QObject::connect(&client, &lanrdp::Session::frameReceived, &client,
+                     [&lists](const lanrdp::Frame &frame) {
+                         if (frame.type != static_cast<quint8>(lanrdp::FrameType::ScreenList))
+                             return;
+                         if (auto decoded = lanrdp::decodeScreenList(frame.payload))
+                             lists.append(*decoded);
+                     });
+
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(!lists.isEmpty(), 5000);
+
+    const QVector<lanrdp::MonitorInfo> monitors = lanrdp::ScreenCapturer::enumerateOutputs();
+    if (monitors.isEmpty())
+        QSKIP("枚举不到任何已附着的显示输出（无桌面会话？），只验了「有帧」这一半");
+
+    // 列表必须与真实枚举**逐项一致**：屏的数量、几何、主屏标记。
+    QCOMPARE(lists.first().screens.size(), monitors.size());
+    int primaries = 0;
+    for (int i = 0; i < monitors.size(); ++i) {
+        QCOMPARE(lists.first().screens.at(i).width, quint32(monitors.at(i).rect.width()));
+        QCOMPARE(lists.first().screens.at(i).height, quint32(monitors.at(i).rect.height()));
+        QCOMPARE(lists.first().screens.at(i).x, qint32(monitors.at(i).rect.x()));
+        QCOMPARE(lists.first().screens.at(i).y, qint32(monitors.at(i).rect.y()));
+        QCOMPARE(lists.first().screens.at(i).primary, monitors.at(i).isPrimary);
+        primaries += monitors.at(i).isPrimary ? 1 : 0;
+    }
+    QCOMPARE(primaries, 1);
+    // 首次接入默认看主屏
+    QVERIFY(lists.first().currentScreen() != nullptr);
+    QVERIFY(lists.first().currentScreen()->primary);
+}
+
+// 选屏是**请求**，答复永远是一份新状态 —— 即便「选了跟现在一样的那块」也要回。
+// 没有这条，控制端就分不清「在途」还是「被忽略」，界面会一直显示旧状态。
+void TestHostController::screenSelectAlwaysAcknowledgedWithNewList()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    QVector<lanrdp::ScreenList> lists;
+    QObject::connect(&client, &lanrdp::Session::frameReceived, &client,
+                     [&lists](const lanrdp::Frame &frame) {
+                         if (frame.type != static_cast<quint8>(lanrdp::FrameType::ScreenList))
+                             return;
+                         if (auto decoded = lanrdp::decodeScreenList(frame.payload))
+                             lists.append(*decoded);
+                     });
+
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(!lists.isEmpty(), 5000);
+
+    const int before = lists.size();
+    client.sendFrame(static_cast<quint8>(lanrdp::FrameType::ScreenSelect),
+                     lanrdp::encodeScreenSelect(0));
+    QTRY_VERIFY_WITH_TIMEOUT(lists.size() > before, 5000);
+    QCOMPARE(lists.last().current, quint8(0));
+}
+
+// 越界的 index（那块屏被拔掉了 / 控制端记的是旧列表）不许改状态，
+// 但**必须**回一份新列表把控制端拉回真实状态 —— 不要静默丢弃。
+void TestHostController::invalidScreenSelectDoesNotChangeOutput()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    QVector<lanrdp::ScreenList> lists;
+    QObject::connect(&client, &lanrdp::Session::frameReceived, &client,
+                     [&lists](const lanrdp::Frame &frame) {
+                         if (frame.type != static_cast<quint8>(lanrdp::FrameType::ScreenList))
+                             return;
+                         if (auto decoded = lanrdp::decodeScreenList(frame.payload))
+                             lists.append(*decoded);
+                     });
+
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(!lists.isEmpty(), 5000);
+
+    const quint8 beforeCurrent = lists.first().current;
+    const int    beforeIndex   = hc.screenOutputIndex();
+    const int    beforeCount   = lists.size();
+
+    // 本机多半只有一块屏；用一个必定越界的序号（15），保证走的是「无效」分支。
+    client.sendFrame(static_cast<quint8>(lanrdp::FrameType::ScreenSelect),
+                     lanrdp::encodeScreenSelect(15));
+    QTRY_VERIFY_WITH_TIMEOUT(lists.size() > beforeCount, 5000);
+
+    QCOMPARE(lists.last().current, beforeCurrent);
+    QCOMPARE(hc.screenOutputIndex(), beforeIndex);
 }
 
 QTEST_GUILESS_MAIN(TestHostController)

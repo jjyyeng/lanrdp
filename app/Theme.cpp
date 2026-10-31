@@ -209,9 +209,12 @@ QPushButton:default:hover { background: %9; border-color: %9; }
        c.surfaceHover.name(), c.borderStrong.name(), c.surfaceActive.name(),
        c.accent.name(), c.onAccent.name(), c.accentHover.name());
 
-    // ⑤ 禁用态、复选框、进度条、三处对话框提示（口令报错 / 表单说明 / 防火墙）。
+    // ⑤ 禁用态、复选框、进度条、四处对话框提示（口令报错 / 连接报错 / 表单说明 / 防火墙）。
     //    QCheckBox::indicator / QSpinBox 的上下按钮**故意不写** —— 交给 Fusion
     //    按 palette 上色。手写 indicator 想加勾号还得配图片资源，反而更差。
+    //
+    //    ⚠️ 报错行必须在这里有规则，且颜色取 danger：没有规则时它落回默认调色板的
+    //    正文色，看上去是「提示」而不是「错误」，而单测只断言可见性与文案，查不出来。
     ss += QStringLiteral(R"(
 QPushButton:disabled { color: %1; background: %2; border-color: %3; }
 
@@ -228,7 +231,7 @@ QProgressBar {
 QProgressBar::chunk { background: %6; border-radius: 3px; }
 
 QLabel#passwordErrorHint { color: %7; }
-QLabel#connectPasswordError { color: %7; }
+QLabel#connectErrorHint { color: %7; }
 QLabel#formHint { color: %1; }
 QLabel#firewallHint { color: %8; }
 )").arg(c.textMuted.name(), c.surface.name(), c.border.name(),

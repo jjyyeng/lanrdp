@@ -515,10 +515,17 @@ bool H264Decoder::decodeFrame(const QByteArray &bitstream, QVector<QImage> &fram
             return false;
         // 重投一次
         IMFMediaBuffer *retryBuffer = nullptr;
-        if (FAILED(::MFCreateMemoryBuffer(static_cast<DWORD>(bitstream.size()), &retryBuffer)))
+        HRESULT retryHr = ::MFCreateMemoryBuffer(static_cast<DWORD>(bitstream.size()), &retryBuffer);
+        if (FAILED(retryHr)) {
+            // 提前失败也必须写 lastError：否则 decodeFailed 上报的是**上一次**的陈旧消息，
+            // 排查时会被引到错误的方向。
+            m_impl->lastError = hrText("重投建 buffer 失败", retryHr);
             return false;
+        }
         BYTE *retryDest = nullptr;
-        if (FAILED(retryBuffer->Lock(&retryDest, nullptr, nullptr)) || retryDest == nullptr) {
+        retryHr = retryBuffer->Lock(&retryDest, nullptr, nullptr);
+        if (FAILED(retryHr) || retryDest == nullptr) {
+            m_impl->lastError = hrText("重投 Lock 失败", FAILED(retryHr) ? retryHr : E_POINTER);
             retryBuffer->Release();
             return false;
         }
@@ -527,7 +534,9 @@ bool H264Decoder::decodeFrame(const QByteArray &bitstream, QVector<QImage> &fram
         retryBuffer->SetCurrentLength(static_cast<DWORD>(bitstream.size()));
 
         IMFSample *retrySample = nullptr;
-        if (FAILED(::MFCreateSample(&retrySample))) {
+        retryHr = ::MFCreateSample(&retrySample);
+        if (FAILED(retryHr)) {
+            m_impl->lastError = hrText("重投建 sample 失败", retryHr);
             retryBuffer->Release();
             return false;
         }

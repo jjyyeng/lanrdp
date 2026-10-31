@@ -1,12 +1,16 @@
 #include "host/HostController.h"
 
 #include "app/LogPort.h"
+#include "host/AudioCapturer.h"
+#include "host/AudioStreamer.h"
 #include "host/InputInjector.h"
+#include "host/ScreenCapturer.h"
 #include "host/ScreenStreamer.h"
 #include "net/FileReceiver.h"
 #include "net/HostServer.h"
 #include "net/Session.h"
 #include "protocol/InputEvent.h"
+#include "protocol/ScreenControl.h"
 
 #include <QTcpSocket>
 #include <QTimer>
@@ -74,6 +78,11 @@ void HostController::ensureTimers()
 
     // 统计：每秒推一次快照。菜单 / 列表那些是**事件驱动**的（notifyUi 在变化处），
     // 但「帧率 / 带宽」这类计数是连续变化的，等不到事件 —— 只能定时送。
+    //
+    // ⚠️ 这个定时器创建后**有意永不停止**（stop() 里不停），与 idleTimer_ 不同：
+    // 它只做每秒一次 notifyUi()，停止监听后代价是空刷（微秒级）；若在 stop() 里停掉，
+    // 这里就必须改成「已存在则 start()」，否则第二次开始监听后状态栏再也不刷新 ——
+    // 一个很隐蔽的回归。真要停请两边一起改，并补一条 start→stop→start 的用例。
     if (!statsTimer_) {
         statsTimer_ = new QTimer(this);
         statsTimer_->setInterval(kStatsIntervalMs);
@@ -85,6 +94,43 @@ void HostController::ensureTimers()
 HostController::~HostController()
 {
     stop();
+}
+
+// 幂等：建音频扇出 + 采集线程，并把两者接起来。
+//
+// 采集线程**不在这里启动** —— 由「第一个控制端接入」驱动（见 handleAuthenticated）。
+// 没人听的时候不做 loopback 采集：那是一条常年跑着的设备流，白耗电也白占设备。
+void HostController::ensureAudio()
+{
+    if (audio_)
+        return;
+
+    audio_ = new AudioStreamer(this);
+
+    // 采集线程是本对象的子对象 ⇒ 由析构收尾。它的 **QObject 亲和性**在宿主线程，
+    // `run()` 在自己的线程里跑；析构时 `~AudioCapturer` 会 `stopAndWait()`（有界）。
+    audioCapturer_ = new AudioCapturer(this);
+
+    connect(audioCapturer_, &AudioCapturer::chunkReady, this,
+            [this](qint64 tsMs, const QByteArray &pcm, const AudioFormat &format) {
+                if (audio_)
+                    audio_->submit(format, tsMs, pcm);
+            });
+
+    // 格式只在首次 / 变化时发一次：这是「用户要知道的」级别，不是每块的噪声。
+    connect(audioCapturer_, &AudioCapturer::formatChanged, this,
+            [this](const AudioFormat &format) {
+                emit logLine(QStringLiteral("音频采集：%1 Hz / %2 声道 / 每块 %3 ms")
+                                 .arg(format.sampleRate)
+                                 .arg(format.channels)
+                                 .arg(format.blockMs));
+            });
+
+    // 音频起不来**不影响画面**：只记一行日志 + 状态栏，不弹框、不停流。
+    connect(audioCapturer_, &AudioCapturer::failed, this, [this](const QString &reason) {
+        emit logLine(QStringLiteral("音频采集不可用（画面不受影响）：%1").arg(reason));
+        emit statusText(QStringLiteral("对方听不到声音：音频采集不可用"));
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +200,14 @@ bool HostController::start(quint16 port, const QString &password)
     // 应用当前的编码选择（无论 streamer_ 是新建还是复用）。
     applyCodec();
 
+    // 多屏：每次开始监听都回到主屏。选屏是**本次会话的临时状态**，不落盘
+    //（与界面里那两项全局偏好同规矩），上一轮有人切到屏 2 不该影响下一轮。
+    if (streamer_)
+        streamer_->setOutputIndex(-1);
+
+    // 音频对象（扇出 + 采集线程）在此建立；真正开采集要等有控制端接入。
+    ensureAudio();
+
     host_ = new HostServer(password, this);
 
     connect(host_, &HostServer::listening, this, &HostController::listening);
@@ -206,6 +260,13 @@ void HostController::stop()
 {
     // 先补掉悬空的按下：停监听之后，对端就算想送「抬起」也没路了。
     releaseStuckMouseButtons(QStringLiteral("停止监听"));
+
+    // 音频采集线程必须**在摘会话之前**停：它的块要经 Session 发出去，
+    // 会话正在被销毁时往里面写就是踩悬空指针。`stopAndWait` 有界（循环最长阻塞 50 ms）。
+    if (audioCapturer_)
+        audioCapturer_->stopAndWait();
+    if (audio_)
+        audio_->clearTargets();
 
     if (!host_)
         return;
@@ -299,6 +360,20 @@ void HostController::handleAuthenticated(Session *session)
         }
     }
 
+    // 音频：与画面扇出同一时刻接线（都在「已鉴权」之后）。
+    // 采集只在**第一个**目标接入时起 —— 四个人分别接进来不该起停四次设备。
+    if (audio_) {
+        const bool firstAudioTarget = (audio_->targetCount() == 0);
+        audio_->addTarget(session);
+        if (firstAudioTarget && audioCapturer_ && !audioCapturer_->isRunning())
+            audioCapturer_->startCapture();
+    }
+
+    // 多屏：把「有几块屏、现在在看哪块」告诉这个新接入的控制端。
+    // 顺序无关（列表与画面各自独立），但必须**在鉴权之后** —— 之前发等于丢。
+    // 发给所有会话而不是单个：a) 顺带校正其他人的视图；b) 屏可能刚插拔过。
+    broadcastScreenList();
+
     notifyUi();
     emit statusText(QStringLiteral("控制端已连接，正在推送画面"));
 }
@@ -341,6 +416,13 @@ void HostController::handleDisconnected(Session *session)
     // ⚠️ 只收掉**断开这条连接自己那一份** —— 接收器按来源隔离，别连累别人。
     if (fileReceiver_)
         fileReceiver_->abort(session);
+
+    // 音频：先摘这一个目标；最后一个听的人走了就把采集停掉（把设备还回去）。
+    if (audio_) {
+        audio_->removeTarget(session);
+        if (audio_->targetCount() == 0 && audioCapturer_)
+            audioCapturer_->stopAndWait();
+    }
 
     if (streamer_) {
         streamer_->removeTarget(session);
@@ -393,6 +475,15 @@ void HostController::handleSessionFrame(Session *session, const Frame &frame)
         releaseStuckMouseButtons(QStringLiteral("控制端让出操作权"));
         emit logLine(QStringLiteral("控制端让出了操作权：%1").arg(peerName(session)));
         notifyUi();
+        return;
+    }
+
+    // ---- 多屏：选屏是**请求**，答复一律是一份新的 SCREEN_LIST ----
+    if (frame.type == static_cast<std::uint8_t>(FrameType::ScreenSelect)) {
+        const auto index = decodeScreenSelect(frame.payload);
+        if (!index)
+            return;   // 坏载荷静默丢弃（与音频同规矩：不值得为它断连接）
+        applyScreenSelect(*index);
         return;
     }
 
@@ -628,6 +719,9 @@ Session *HostController::sessionOfToken(TokenGate::Token t) const
 
 void HostController::setCodec(bool useH264, int bitrateBps)
 {
+    // 写访问器 = 必须在本对象所属线程调用（GUI 侧走 `MainWindow::postToHost`）。
+    Q_ASSERT_X(thread() == QThread::currentThread(), "HostController::setCodec",
+               "must run on the controller's own thread (GUI must go through postToHost)");
     useH264_ = useH264;
     bitrate_ = bitrateBps;
     applyCodec();
@@ -646,6 +740,9 @@ void HostController::applyCodec()
 
 void HostController::setReceiveDir(const QString &dir)
 {
+    // 写访问器 = 必须在本对象所属线程调用（GUI 侧走 `MainWindow::postToHost`）。
+    Q_ASSERT_X(thread() == QThread::currentThread(), "HostController::setReceiveDir",
+               "must run on the controller's own thread (GUI must go through postToHost)");
     if (dir.isEmpty())
         return;
     receiveDir_ = dir;
@@ -711,6 +808,114 @@ QString HostController::sourceInfo() const
 QString HostController::codecInfo() const
 {
     return streamer_ ? streamer_->codecInfo() : QString();
+}
+
+bool HostController::audioCaptureRunning() const
+{
+    return audioCapturer_ && audioCapturer_->isRunning();
+}
+
+QString HostController::audioInfo() const
+{
+    if (!audio_ || !audio_->hasFormat())
+        return QString();
+    const AudioFormat format = audio_->format();
+    return QStringLiteral("%1 Hz / %2 声道").arg(format.sampleRate).arg(format.channels);
+}
+
+// ---------------------------------------------------------------------------
+// 多屏（协议 v5）
+// ---------------------------------------------------------------------------
+
+QVector<ScreenInfo> HostController::currentScreens()
+{
+    QVector<ScreenInfo> screens;
+    for (const MonitorInfo &monitor : ScreenCapturer::enumerateOutputs()) {
+        ScreenInfo info;
+        info.x       = monitor.rect.x();
+        info.y       = monitor.rect.y();
+        info.width   = static_cast<quint32>(monitor.rect.width());
+        info.height  = static_cast<quint32>(monitor.rect.height());
+        info.primary = monitor.isPrimary;
+        screens.append(info);
+    }
+    return screens;
+}
+
+int HostController::screenCount() const
+{
+    return currentScreens().size();
+}
+
+int HostController::screenOutputIndex() const
+{
+    // 抓屏器已经真的抓过一帧 ⇒ 它报的 index 就是事实（含「请求那块屏不在了、
+    // 已回落主屏」这种情况 —— ScreenCapturer 回落后会把真实 index 报上来）。
+    if (streamer_ && streamer_->outputIndex() >= 0)
+        return streamer_->outputIndex();
+
+    // 还没抓过（刚启动监听 / 刚连上）：报主屏 —— 抓屏器第一次初始化就是往主屏去的。
+    const QVector<ScreenInfo> screens = currentScreens();
+    for (int i = 0; i < screens.size(); ++i) {
+        if (screens.at(i).primary)
+            return i;
+    }
+    return screens.isEmpty() ? -1 : 0;
+}
+
+void HostController::broadcastScreenList()
+{
+    if (!host_)
+        return;
+
+    ScreenList list;
+    list.screens = currentScreens();
+    if (list.screens.isEmpty())
+        return;   // 一块屏都列不出来：encodeScreenList 会拒发，不必白跑一趟
+
+    int current = screenOutputIndex();
+    if (current < 0 || current >= list.screens.size())
+        current = 0;
+    list.current = static_cast<quint8>(current);
+
+    const QByteArray payload = encodeScreenList(list);
+    if (payload.isEmpty())
+        return;
+
+    for (Session *session : host_->sessions()) {
+        if (session)
+            session->sendFrame(static_cast<std::uint8_t>(FrameType::ScreenList), payload);
+    }
+}
+
+void HostController::applyScreenSelect(quint8 index)
+{
+    const QVector<ScreenInfo> screens = currentScreens();
+
+    if (index >= screens.size()) {
+        // 那块屏不在了（插拔 / 枚举顺序变了 / 控制端手上是旧列表）。
+        // **不改状态**，但仍要回一份新列表 —— 请求必须有明确答复，
+        // 否则控制端界面会一直勾在一块不存在的屏上。
+        emit logLine(QStringLiteral("收到无效的选屏请求（第 %1 块，当前共 %2 块），已忽略")
+                         .arg(index + 1)
+                         .arg(screens.size()));
+    } else {
+        const int previous = screenOutputIndex();
+        if (streamer_) {
+            streamer_->setOutputIndex(index);   // 同值不去抖；换屏会强制 IDR
+            if (previous != index) {
+                // 全局一块屏：所有控制端看到的都是同一块，日志只记一行（谁切的都一样）。
+                emit logLine(QStringLiteral("切换到第 %1 块屏（%2×%3）")
+                                 .arg(index + 1)
+                                 .arg(screens.at(index).width)
+                                 .arg(screens.at(index).height));
+                emit statusText(QStringLiteral("已切换画面来源：第 %1 块屏").arg(index + 1));
+            }
+        }
+    }
+
+    // 成败都广播：控制端不做本地推测，一律以最新这份为准。
+    broadcastScreenList();
 }
 
 } // namespace lanrdp

@@ -142,7 +142,9 @@ int main(int argc, char *argv[])
     const bool autoMode = hostMode || connectMode;
 
     if (autoMode || quitOnResult || expectFrameMs > 0) {
-        QObject::connect(&window, &MainWindow::handshakeResult,
+        // SingleShot：自动重连成功后 handshakeResult 会**再发一次**。只认第一次结果，
+        // 否则下面几个分支（发输入 / 持令牌 / 发文件）会重复执行。
+        QObject::connect(&window, &MainWindow::handshakeResult, &window,
                          [&](bool ok, const QString &message) {
                              QTextStream out(stdout);
                              out << (ok ? QStringLiteral("RESULT OK") : QStringLiteral("RESULT DENY"))
@@ -153,7 +155,7 @@ int main(int argc, char *argv[])
                                  && sendFilePath.isEmpty()) {
                                  QTimer::singleShot(50, &app, [&app, ok]() { app.exit(ok ? 0 : 1); });
                              }
-                         });
+                         }, Qt::SingleShotConnection);
     }
 
     if (hostMode) {
@@ -291,7 +293,7 @@ int main(int argc, char *argv[])
                                  app.exit(3);
                              });
                              tokenTimeout->start();
-                         });
+                         }, Qt::SingleShotConnection);
     }
 
     // ---- 控制端连接后持有输入令牌并保持 N ms（用于验收「4 控 1 仅 1 可输入」的竞争场景）----
@@ -329,7 +331,7 @@ int main(int argc, char *argv[])
                                  app.exit(3);
                              });
                              tokenTimeout->start();
-                         });
+                         }, Qt::SingleShotConnection);
     }
 
     // ---- 控制端发一个文件（验证「读文件 -> 分块 -> TCP -> 对端落盘 + sha256 校验」整条链路）----
@@ -352,7 +354,7 @@ int main(int argc, char *argv[])
                                      app.exit(1);
                                  }
                              });
-                         });
+                         }, Qt::SingleShotConnection);
 
         QObject::connect(&window, &MainWindow::fileSent, &window,
                          [&app, &window](bool ok, const QString &path, const QString &message) {
