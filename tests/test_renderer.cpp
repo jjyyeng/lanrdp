@@ -19,8 +19,8 @@ private slots:
     void scaledRectFitsAndKeepsAspect();
     void scaledRectLetterboxesWideWidget();
     void scaledRectHandlesDegenerateInput();
-    void smoothScalingSkippedOnlyInDeadZone();
-    void deadZoneSmoothingCanBeOverridden();
+    // 缩小时**一律**平滑：这条钉住「不再有最近邻档」
+    void shrinkIsNeverNearestNeighbour();
     void storesAndClearsFrame();
     // 「点此操作对方电脑」只对有远端的格子有意义（本机预览格必须不显示）
     void hintOnlyForCellsWithRemote();
@@ -69,55 +69,42 @@ void TestRenderer::scaledRectHandlesDegenerateInput()
     QVERIFY(lanrdp::ScreenRenderer::scaledTargetRect(QSize(10, 10), QSize(0, 0)).isNull());
 }
 
-void TestRenderer::smoothScalingSkippedOnlyInDeadZone()
-{
-    using lanrdp::ScreenRenderer;
-
-    // 放大：必须开平滑，否则马赛克块明显。
-    QVERIFY(ScreenRenderer::useSmoothScalingFor(QSize(800, 600), QSize(1600, 1200)));
-
-    // 面积比 = 1（几乎不缩放）：死区 ⇒ 关（平滑对观感无益，纯烧 CPU）。
-    QVERIFY(!ScreenRenderer::useSmoothScalingFor(QSize(900, 900), QSize(900, 900)));
-
-    // 面积比 0.25（线性 0.5）：仍在死区 (1/9, 1] ⇒ 关。
-    QVERIFY(!ScreenRenderer::useSmoothScalingFor(QSize(900, 900), QSize(450, 450)));
-    // 略大于 1/9（面积比 ≈ 0.1186）仍在死区 ⇒ 关。
-    QVERIFY(!ScreenRenderer::useSmoothScalingFor(QSize(900, 900), QSize(310, 310)));
-
-    // 面积比 = 1/9 边界：大幅缩放 ⇒ 开（`<=` 含等号）。
-    QVERIFY(ScreenRenderer::useSmoothScalingFor(QSize(900, 900), QSize(300, 300)));
-    // 面积比 1/16：更大幅缩小 ⇒ 开。
-    QVERIFY(ScreenRenderer::useSmoothScalingFor(QSize(900, 900), QSize(225, 225)));
-
-    // 尺寸非法：兜底按画质优先。
-    QVERIFY(ScreenRenderer::useSmoothScalingFor(QSize(0, 0), QSize(100, 100)));
-    QVERIFY(ScreenRenderer::useSmoothScalingFor(QSize(100, 100), QSize(0, 0)));
-
-    // 接线冒烟：死区尺寸下实际绘制不崩（判定生效与否由上面的纯函数覆盖）。
-    ScreenRenderer renderer;
-    QImage         image(3840, 2160, QImage::Format_ARGB32);
-    image.fill(Qt::darkBlue);
-    renderer.setFrame(image);
-    renderer.resize(3600, 2025);  // 面积比 ≈ 0.879 ⇒ 死区
-    renderer.repaint();
-    QCOMPARE(renderer.frameSize(), QSize(3840, 2160));
-}
-
-void TestRenderer::deadZoneSmoothingCanBeOverridden()
+// 缩小时**一律**平滑 —— 不允许再出现最近邻档。
+//
+// 最近邻会把汉字笔画断成碎块、1px 线断续（真机对比里差别最大的一档），所以绘制期
+// 不再按缩放幅度做减法。这里用 1px 竖条纹缩到 0.47 倍来探：最近邻对每一目的像素
+// 只取样一个源像素，输出必然是纯黑或纯白；平滑一定混出中间灰。
+// 判据刻意不提具体算法，只问「有没有中间值」—— 将来换实现也照样成立。
+void TestRenderer::shrinkIsNeverNearestNeighbour()
 {
     lanrdp::ScreenRenderer renderer;
+    renderer.setInputHintEnabled(false);   // 别让「点此操作对方电脑」盖在画面上
+    // ⚠️ 控件的 minimumSize 是 320×240，再小的 resize 会被夹回去（画面随之按 2.5 倍放大）
+    renderer.resize(360, 270);
 
-    // 死区（面积比 0.25，线性 0.5）默认走省性能路径：不开平滑。
-    QVERIFY(!renderer.smoothScalingFor(QSize(900, 900), QSize(450, 450)));
+    QImage frame(768, 576, QImage::Format_ARGB32);   // 4:3，缩到 0.469 倍正好铺满
+    for (int y = 0; y < frame.height(); ++y) {
+        for (int x = 0; x < frame.width(); ++x)
+            frame.setPixel(x, y, (x % 2) ? qRgb(255, 255, 255) : qRgb(0, 0, 0));
+    }
+    renderer.setFrame(frame);
 
-    // 一格独享 / 占满时允许在死区也开平滑（那种场景画面只有这一份要画，
-    // 关掉会让文字发虚 —— 真机反馈「1 格看 2560×1440 不清楚」）。
-    renderer.setSmoothInDeadZone(true);
-    QVERIFY(renderer.smoothScalingFor(QSize(900, 900), QSize(450, 450)));
+    QImage canvas(360, 270, QImage::Format_ARGB32);
+    canvas.fill(Qt::transparent);
+    renderer.render(&canvas);
 
-    // 总开关仍能一票否决（与现有 setSmoothScaling(false) 语义一致）。
-    renderer.setSmoothScaling(false);
-    QVERIFY(!renderer.smoothScalingFor(QSize(900, 900), QSize(450, 450)));
+    // 只取内部区域：最外几圈可能叠了控件描边，且缩放边缘本来就会混色。
+    bool sawIntermediate = false;
+    for (int y = 4; y < canvas.height() - 4 && !sawIntermediate; ++y) {
+        for (int x = 4; x < canvas.width() - 4; ++x) {
+            const int gray = qGray(canvas.pixel(x, y));
+            if (gray > 16 && gray < 239) {
+                sawIntermediate = true;
+                break;
+            }
+        }
+    }
+    QVERIFY2(sawIntermediate, "缩小应走平滑；只出纯黑白说明退回了最近邻");
 }
 
 void TestRenderer::storesAndClearsFrame()

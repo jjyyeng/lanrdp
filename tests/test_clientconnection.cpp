@@ -36,6 +36,8 @@ private slots:
     void reconnectBackoffGrowsAcrossAutoReconnects();
     // 口令被拒 ≠ 网络故障：不许自动重连（否则拿错口令无限重试 + 刷爆对端退避）
     void authRejectionStopsAutoReconnect();
+    // 退役 socket 的迟到错误不许结算到新一轮尝试上（否则新连接永远 ready 不了）
+    void errorFromRetiredSocketIsNotCurrent();
 };
 
 // 传输 id 从随机值起步、同连接内递增。
@@ -238,6 +240,31 @@ void TestClientConnection::authRejectionStopsAutoReconnect()
     QVERIFY2(conn.ready(), "改对的口令应当能连上（被拒标记必须在新尝试时清掉）");
 
     conn.disconnectNow();
+}
+
+// 退役 socket 的迟到错误不能被当成「当前连接」的错误。
+//
+// 病灶：错误分支读的是 session_->socket()，且会把 handshakeReported_ 置位。
+// teardown() 之后旧 socket 并没有立刻消失（Session 走 deleteLater），它若在新一轮
+// connectTo() 之后才报错，就会把新连接结算成失败 —— 之后真握手回来会被
+// handshakeReported_ 挡在门外，ready 永远是 false，画面不来。
+//
+// 只钉判据本身：真实时序（旧 socket 恰好在重建之后的一个事件循环回合内报错）
+// 没法在不给本类开测试钩子的前提下稳定复现，硬造一条就是不可靠用例。
+void TestClientConnection::errorFromRetiredSocketIsNotCurrent()
+{
+    auto *current = new QTcpSocket;   // 所有权随即交给 Session
+    auto *retired = new QTcpSocket;   // 模拟上一轮退役、尚未被 deleteLater 回收的 socket
+    lanrdp::Session session(current, nullptr);
+
+    QVERIFY2(lanrdp::ClientConnection::isCurrentSocket(&session, current),
+             "当前会话持有的 socket 必须被判为当前 socket");
+    QVERIFY2(!lanrdp::ClientConnection::isCurrentSocket(&session, retired),
+             "退役 socket 的迟到错误不该结算到当前连接上");
+    QVERIFY2(!lanrdp::ClientConnection::isCurrentSocket(nullptr, current),
+             "会话已拆除时没有「当前 socket」，任何错误都不该结算");
+
+    delete retired;   // current 随 session 析构回收
 }
 
 QTEST_GUILESS_MAIN(TestClientConnection)

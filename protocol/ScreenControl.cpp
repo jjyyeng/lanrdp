@@ -1,43 +1,10 @@
 #include "protocol/ScreenControl.h"
 
+#include "protocol/LE.h"
+
 namespace lanrdp {
 
 namespace {
-
-void appendU8(QByteArray &out, quint8 value)
-{
-    out.append(static_cast<char>(value));
-}
-
-void appendU32LE(QByteArray &out, quint32 value)
-{
-    for (int i = 0; i < 4; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-// 坐标是有符号的：屏在主屏左侧 / 上方时是负数。
-void appendI32LE(QByteArray &out, qint32 value)
-{
-    appendU32LE(out, static_cast<quint32>(value));
-}
-
-quint8 readU8(const QByteArray &data, qsizetype offset)
-{
-    return static_cast<quint8>(data.at(offset));
-}
-
-quint32 readU32LE(const QByteArray &data, qsizetype offset)
-{
-    quint32 value = 0;
-    for (int i = 0; i < 4; ++i)
-        value |= static_cast<quint32>(readU8(data, offset + i)) << (8 * i);
-    return value;
-}
-
-qint32 readI32LE(const QByteArray &data, qsizetype offset)
-{
-    return static_cast<qint32>(readU32LE(data, offset));
-}
 
 bool isValidScreenInfo(const ScreenInfo &screen)
 {
@@ -87,16 +54,16 @@ QByteArray encodeScreenList(const ScreenList &list)
 
     QByteArray out;
     out.reserve(kScreenListHeaderSize + kScreenEntrySize * list.screens.size());
-    appendU8(out, kScreenControlVersion);
-    appendU8(out, static_cast<quint8>(list.screens.size()));
-    appendU8(out, list.current);
+    le::appendU8(out, kScreenControlVersion);
+    le::appendU8(out, static_cast<quint8>(list.screens.size()));
+    le::appendU8(out, list.current);
 
     for (const ScreenInfo &screen : list.screens) {
-        appendI32LE(out, screen.x);
-        appendI32LE(out, screen.y);
-        appendU32LE(out, screen.width);
-        appendU32LE(out, screen.height);
-        appendU8(out, screen.primary ? 1 : 0);
+        le::appendI32(out, screen.x);
+        le::appendI32(out, screen.y);
+        le::appendU32(out, screen.width);
+        le::appendU32(out, screen.height);
+        le::appendU8(out, screen.primary ? 1 : 0);
     }
     return out;
 }
@@ -105,10 +72,10 @@ std::optional<ScreenList> decodeScreenList(const QByteArray &payload)
 {
     if (payload.size() < kScreenListHeaderSize)
         return std::nullopt;
-    if (readU8(payload, 0) != kScreenControlVersion)
+    if (le::readU8(payload, 0) != kScreenControlVersion)
         return std::nullopt;
 
-    const int count = readU8(payload, 1);
+    const int count = le::readU8(payload, 1);
     if (count <= 0 || count > kMaxScreens)
         return std::nullopt;
 
@@ -119,16 +86,16 @@ std::optional<ScreenList> decodeScreenList(const QByteArray &payload)
 
     ScreenList list;
     list.screens.reserve(count);
-    list.current = readU8(payload, 2);
+    list.current = le::readU8(payload, 2);
 
     qsizetype offset = kScreenListHeaderSize;
     for (int i = 0; i < count; ++i) {
         ScreenInfo screen;
-        screen.x       = readI32LE(payload, offset);
-        screen.y       = readI32LE(payload, offset + 4);
-        screen.width   = readU32LE(payload, offset + 8);
-        screen.height  = readU32LE(payload, offset + 12);
-        screen.primary = readU8(payload, offset + 16) != 0;
+        screen.x       = le::readI32(payload, offset);
+        screen.y       = le::readI32(payload, offset + 4);
+        screen.width   = le::readU32(payload, offset + 8);
+        screen.height  = le::readU32(payload, offset + 12);
+        screen.primary = le::readU8(payload, offset + 16) != 0;
         list.screens.append(screen);
         offset += kScreenEntrySize;
     }
@@ -148,8 +115,8 @@ QByteArray encodeScreenSelect(quint8 index)
 
     QByteArray out;
     out.reserve(kScreenSelectSize);
-    appendU8(out, kScreenControlVersion);
-    appendU8(out, index);
+    le::appendU8(out, kScreenControlVersion);
+    le::appendU8(out, index);
     return out;
 }
 
@@ -157,10 +124,10 @@ std::optional<quint8> decodeScreenSelect(const QByteArray &payload)
 {
     if (payload.size() != kScreenSelectSize)
         return std::nullopt;
-    if (readU8(payload, 0) != kScreenControlVersion)
+    if (le::readU8(payload, 0) != kScreenControlVersion)
         return std::nullopt;
 
-    const quint8 index = readU8(payload, 1);
+    const quint8 index = le::readU8(payload, 1);
     if (index >= kMaxScreens)
         return std::nullopt;
     return index;

@@ -6,6 +6,7 @@
 #include <QString>
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
@@ -46,6 +47,9 @@ public:
         QString password;                       // 空 = 必须由用户当场输入
         QString receiveDir  = defaultReceiveDir();
         bool    useH264     = true;
+        // 压缩传输的码率上限（bps）。自适应只在这个值**以下**调节，所以它是天花板
+        // 而非固定值：设 16 Mbps 不代表一定发 16 Mbps，网络差时会自己降。
+        int     bitrateBps  = 8 * 1000 * 1000;
     };
 
     explicit HostConfigDialog(const Config &initial, QWidget *parent = nullptr);
@@ -67,6 +71,7 @@ private:
     QLabel    *passwordError_ = nullptr;
     QLineEdit *recvDir_       = nullptr;
     QCheckBox *h264_          = nullptr;
+    QComboBox *bitrate_       = nullptr;
 };
 
 // 【新连接…】：控制端连接参数。

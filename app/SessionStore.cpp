@@ -37,6 +37,20 @@ QString readTrimmed(const QSettings &ini, const QString &key, const QString &fal
     return value.isEmpty() ? fallback : value;
 }
 
+// 码率上下限。ini 可以被人手改，读到 0 或 10 位数字都不奇怪 —— 越界一律退回默认，
+// 而不是把一个荒谬的值带进编码器（`setH264Params` 只兜住了下限 100 kbps）。
+constexpr int kMinBitrateBps = 100 * 1000;          // 100 kbps
+constexpr int kMaxBitrateBps = 100 * 1000 * 1000;   // 100 Mbps
+
+int readBitrate(const QSettings &ini, const QString &key, int fallback)
+{
+    bool ok = false;
+    const int value = ini.value(key).toInt(&ok);
+    if (!ok || value < kMinBitrateBps || value > kMaxBitrateBps)
+        return fallback;
+    return value;
+}
+
 bool ensureParentDir(const QString &filePath)
 {
     const QString dir = QFileInfo(filePath).absolutePath();
@@ -133,6 +147,7 @@ HostSession SessionStore::loadHost() const
     session.password   = unprotectSecret(ini.value(QStringLiteral("host/password")).toString());
     session.receiveDir = readTrimmed(ini, QStringLiteral("host/receiveDir"), session.receiveDir);
     session.useH264    = ini.value(QStringLiteral("host/useH264"), session.useH264).toBool();
+    session.bitrateBps = readBitrate(ini, QStringLiteral("host/bitrateBps"), session.bitrateBps);
     return session;
 }
 
@@ -161,6 +176,7 @@ bool SessionStore::saveHost(const HostSession &session)
     ini.setValue(QStringLiteral("host/password"), protectSecret(session.password));
     ini.setValue(QStringLiteral("host/receiveDir"), session.receiveDir);
     ini.setValue(QStringLiteral("host/useH264"), session.useH264);
+    ini.setValue(QStringLiteral("host/bitrateBps"), session.bitrateBps);
     ini.sync();
     return ini.status() == QSettings::NoError;
 }

@@ -2,6 +2,7 @@
 
 #include <QAbstractButton>
 #include <QAction>
+#include <QComboBox>
 #include <QDir>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -104,6 +105,8 @@ private slots:
     void emptyStateIconFollowsDevicePixelRatio();
     void startHostRejectsWeakPassword();
     void settingsDialogHoldsTheGlobalSwitches();
+    // 码率上限要能在界面上设，且命令行给的非标准值不能被悄悄改掉
+    void hostDialogCarriesBitrateCap();
     // 被控端口令不得为空
     void hostDialogRejectsEmptyPassword();
     // 控制端地址不得为空
@@ -174,7 +177,6 @@ private slots:
     void barDoubleClickTogglesMaximize();
     void maximizeMovesFocusSoEscapeWorks();
     void barButtonsNeverTakeFocus();
-    void singleCellUsesQualityScaling();
     void addingACellLeavesMaximizedState();
 
     // 断线格的表现
@@ -1096,6 +1098,50 @@ void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
              "端口属于【开始监听…】，不该在【设置…】里再放一份");
     QVERIFY2(!dlg.findChild<QWidget *>(QStringLiteral("recvDirEdit")),
              "接收目录属于【开始监听…】，不该在【设置…】里再放一份");
+}
+
+// 码率上限三件事要同时成立：
+// ① 界面上能设（否则只有知道命令行的人才能改，且每次启动都要重打一遍）；
+// ② 命令行给的非标准值要原样带回来 —— 四舍五入到最近档等于静默改掉用户设过的数字；
+// ③ 勾掉压缩传输时置灰（裸帧路径没有码率可调，留着能点会让人以为改了有用）。
+void TestMainWindowUi::hostDialogCarriesBitrateCap()
+{
+    using lanrdp::HostConfigDialog;
+
+    // 默认档
+    {
+        HostConfigDialog dlg(HostConfigDialog::Config{});
+        auto *combo = dlg.findChild<QComboBox *>(QStringLiteral("bitrateCombo"));
+        QVERIFY2(combo, "【开始监听…】应当有码率下拉（objectName=bitrateCombo）");
+        QCOMPARE(dlg.config().bitrateBps, 8 * 1000 * 1000);
+        QVERIFY2(combo->count() >= 4, "码率至少要有 4 个档位");
+    }
+
+    // 常规档位往返
+    {
+        HostConfigDialog::Config cfg;
+        cfg.bitrateBps = 16 * 1000 * 1000;
+        HostConfigDialog dlg(cfg);
+        QCOMPARE(dlg.config().bitrateBps, 16 * 1000 * 1000);
+    }
+
+    // 命令行给的非标准值必须原样回来
+    {
+        HostConfigDialog::Config cfg;
+        cfg.bitrateBps = 6 * 1000 * 1000;
+        HostConfigDialog dlg(cfg);
+        QCOMPARE(dlg.config().bitrateBps, 6 * 1000 * 1000);
+    }
+
+    // 裸帧路径没有码率可调
+    {
+        HostConfigDialog::Config cfg;
+        cfg.useH264 = false;
+        HostConfigDialog dlg(cfg);
+        auto *combo = dlg.findChild<QComboBox *>(QStringLiteral("bitrateCombo"));
+        QVERIFY(combo);
+        QVERIFY2(!combo->isEnabled(), "关闭压缩传输后码率没有意义，应当置灰");
+    }
 }
 
 // 被控端**口令为空必须当场拦下**。
@@ -2366,44 +2412,6 @@ void TestMainWindowUi::barButtonsNeverTakeFocus()
              "点条上按钮之后焦点不该离开画面");
 
     v0->disconnectButton()->click();
-}
-
-// 一格独享（或占满）时，渲染器**允许在死区也开平滑**。
-//
-// 死区关平滑是为了省 4 路 4K 的绘制开销；但只有一格要画时，那个省出来的 CPU
-// 没人需要，反而让 2560→1100 这种常见缩小退化成最近邻、文字发虚（真机反馈）。
-// 所以「是否允许死区平滑」要跟**可见格数**走，而不是写死成全局开关。
-void TestMainWindowUi::singleCellUsesQualityScaling()
-{
-    MainWindow w(testLogPath());
-
-    // 起步只有一格：允许死区平滑
-    QVERIFY2(w.viewAt(0)->renderer()->smoothInDeadZone(),
-             "一格独享时应允许死区平滑");
-
-    lanrdp::HostServer hostA(QStringLiteral("secret"));
-    lanrdp::HostServer hostB(QStringLiteral("secret"));
-    QVERIFY(hostA.listen(0));
-    QVERIFY(hostB.listen(0));
-
-    w.startConnect(QStringLiteral("127.0.0.1"), hostA.port(), QStringLiteral("secret"));
-    QTRY_VERIFY(w.clientReady());
-    w.startConnect(QStringLiteral("127.0.0.1"), hostB.port(), QStringLiteral("secret"));
-    QTRY_VERIFY(w.viewCount() == 2);
-    QTRY_VERIFY(w.clientReady());
-
-    // 两格并排：回到省性能路径
-    QVERIFY2(!w.viewAt(0)->renderer()->smoothInDeadZone(),
-             "多格时应保持省性能（死区关平滑）");
-
-    // 占满其中一格：又是只有一个可见 ⇒ 恢复死区平滑
-    w.viewAt(0)->maximizeButton()->click();
-    QTRY_VERIFY(w.viewGrid()->isMaximized());
-    QVERIFY2(w.viewAt(0)->renderer()->smoothInDeadZone(),
-             "占满后只剩一格可见，应恢复死区平滑");
-
-    w.viewAt(0)->disconnectButton()->click();
-    w.viewAt(1)->disconnectButton()->click();
 }
 
 // 占满时再点【新连接…】：必须**先退出占满** —— 否则新格一出生就是隐藏的，

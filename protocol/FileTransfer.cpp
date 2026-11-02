@@ -1,52 +1,13 @@
 #include "protocol/FileTransfer.h"
 
+#include "protocol/LE.h"
+
 #include <QCryptographicHash>
 #include <QSet>
 
 namespace lanrdp {
 
 namespace {
-
-void appendU16LE(QByteArray &out, quint16 value)
-{
-    out.append(static_cast<char>(value & 0xFFu));
-    out.append(static_cast<char>((value >> 8) & 0xFFu));
-}
-
-void appendU32LE(QByteArray &out, quint32 value)
-{
-    for (int i = 0; i < 4; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-void appendU64LE(QByteArray &out, quint64 value)
-{
-    for (int i = 0; i < 8; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-quint16 readU16LE(const QByteArray &data, int offset)
-{
-    return static_cast<quint16>(
-        (static_cast<quint16>(static_cast<quint8>(data.at(offset))))
-        | (static_cast<quint16>(static_cast<quint8>(data.at(offset + 1))) << 8));
-}
-
-quint32 readU32LE(const QByteArray &data, int offset)
-{
-    quint32 value = 0;
-    for (int i = 0; i < 4; ++i)
-        value |= static_cast<quint32>(static_cast<quint8>(data.at(offset + i))) << (8 * i);
-    return value;
-}
-
-quint64 readU64LE(const QByteArray &data, int offset)
-{
-    quint64 value = 0;
-    for (int i = 0; i < 8; ++i)
-        value |= static_cast<quint64>(static_cast<quint8>(data.at(offset + i))) << (8 * i);
-    return value;
-}
 
 // Windows 保留设备名：即使带扩展名（如 "CON.txt"）也不能直接落盘，
 // 否则打开文件会异常甚至会挂住。
@@ -88,10 +49,10 @@ QByteArray encodeFileHeader(const FileHeader &header)
 
     QByteArray out;
     out.reserve(static_cast<int>(kFileHeaderFixedSize) + name.size());
-    appendU32LE(out, header.transferId);
-    appendU16LE(out, static_cast<quint16>(name.size()));
+    le::appendU32(out, header.transferId);
+    le::appendU16(out, static_cast<quint16>(name.size()));
     out.append(name);
-    appendU64LE(out, header.totalSize);
+    le::appendU64(out, header.totalSize);
     return out;
 }
 
@@ -100,8 +61,8 @@ std::optional<FileHeader> decodeFileHeader(const QByteArray &payload)
     if (static_cast<std::size_t>(payload.size()) < kFileHeaderFixedSize)
         return std::nullopt;
 
-    const quint32 transferId = readU32LE(payload, 0);
-    const quint16 nameLen    = readU16LE(payload, 4);
+    const quint32 transferId = le::readU32(payload, 0);
+    const quint16 nameLen    = le::readU16(payload, 4);
     if (nameLen == 0)
         return std::nullopt;
 
@@ -113,7 +74,7 @@ std::optional<FileHeader> decodeFileHeader(const QByteArray &payload)
     if (name.isEmpty())
         return std::nullopt;
 
-    const quint64 totalSize = readU64LE(payload, 6 + nameLen);
+    const quint64 totalSize = le::readU64(payload, 6 + nameLen);
     if (totalSize == 0)
         return std::nullopt;
 
@@ -135,8 +96,8 @@ QByteArray encodeFileChunk(const FileChunk &chunk)
 
     QByteArray out;
     out.reserve(static_cast<int>(kFileChunkHeaderSize) + chunk.data.size());
-    appendU32LE(out, chunk.transferId);
-    appendU64LE(out, chunk.offset);
+    le::appendU32(out, chunk.transferId);
+    le::appendU64(out, chunk.offset);
     out.append(chunk.data);
     return out;
 }
@@ -154,8 +115,8 @@ std::optional<FileChunk> decodeFileChunk(const QByteArray &payload)
         return std::nullopt;
 
     FileChunk chunk;
-    chunk.transferId = readU32LE(payload, 0);
-    chunk.offset     = readU64LE(payload, 4);
+    chunk.transferId = le::readU32(payload, 0);
+    chunk.offset     = le::readU64(payload, 4);
     chunk.data       = payload.mid(static_cast<int>(kFileChunkHeaderSize));
     return chunk;
 }
@@ -171,8 +132,8 @@ QByteArray encodeFileEnd(const FileEnd &end)
 
     QByteArray out;
     out.reserve(static_cast<int>(kFileEndSize));
-    appendU32LE(out, end.transferId);
-    appendU64LE(out, end.bytesSent);
+    le::appendU32(out, end.transferId);
+    le::appendU64(out, end.bytesSent);
     out.append(end.sha256);
     return out;
 }
@@ -183,8 +144,8 @@ std::optional<FileEnd> decodeFileEnd(const QByteArray &payload)
         return std::nullopt;
 
     FileEnd end;
-    end.transferId = readU32LE(payload, 0);
-    end.bytesSent  = readU64LE(payload, 4);
+    end.transferId = le::readU32(payload, 0);
+    end.bytesSent  = le::readU64(payload, 4);
     end.sha256     = payload.mid(12, kSha256Size);
     return end;
 }

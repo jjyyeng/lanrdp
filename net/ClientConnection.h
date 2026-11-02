@@ -12,6 +12,7 @@
 
 #include <cstdint>
 
+class QAbstractSocket;
 class QImage;
 class QTimer;
 
@@ -110,6 +111,12 @@ public:
     static bool isDeadLink(bool hasReceived, qint64 msSinceLastRx,
                            qint64 attemptElapsedMs, qint64 deadTimeoutMs);
 
+    // 这条 socket 的错误是否属于「当前这条连接」（纯函数，同 isDeadLink 的理由）。
+    // teardown() 之后旧 socket 不会立刻消失（Session 走 deleteLater），它迟到的
+    // 错误若被结算，会把**新一轮**尝试误判成失败 —— 等真握手回来时又被「已结算」
+    // 挡在门外，画面永远不来。
+    static bool isCurrentSocket(const Session *session, const QAbstractSocket *socket);
+
     // ---- 外部注入的开关（不是连接的属性）----
     void setInputEnabled(bool on) { inputEnabled_ = on; }
     bool inputEnabled() const { return inputEnabled_; }
@@ -123,12 +130,9 @@ public:
     // 等于 no-op）。改成**逐格**取，代价是换布局 / 占满之后要等一帧
     // 新尺寸的画面（由 MainWindow::scheduleDisplayBudget 排队重发）。
     //
-    // ⚠️⚠️ 预算的**面积比要 ≲1/9** 才真的省（`nv12ToArgb32Scaled` 的收益守卫，阈值由
-    // 压测 A2b 扫描定档）。别以为「给了预算就一定缩」：面积比 > 1/9 时它会退回全尺寸。
-    // 两个必记的档位：4K 源 → 屏上 1/2 线性尺寸 = 面积比 **1/4**（慢一倍，最差点）；
-    // 4K 屏上做 2×2 格子时单格正好落在这里 ⇒ **(1/9, 1/4] 是死区**（既省不下来，
-    // 又要白付 QPainter 回退的 3.61 ms/帧）。死区怎么处置（夹尺寸？还是索性不给预算？）
-    // **留到用 bench_decode_multi 实测后再定档，别凭感觉改**。
+    // ⚠️ 预算的**面积比要 ≲1/4** 才真的省（`nv12ToArgb32Scaled` 的收益守卫，2026-11-01
+    // 由 1/9 放宽到 1/4）。面积比 > 1/4 时它会退回全尺寸，那点缩小改由 QPainter 做
+    // （UI 线程 3.61 ms/帧）。4K 屏上做 2×2 格子时单格面积比正好 ≈ 1/4，落在能缩的一侧。
     //
     // 传 `QSize()`（无效）即关闭缩放。设早了也没关系：解码器是惰性创建的，
     // 这里只记下值，创建/重建时再下发。

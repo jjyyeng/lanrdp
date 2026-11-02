@@ -99,24 +99,6 @@ void ScreenRenderer::setSmoothScaling(bool smooth)
     update();
 }
 
-void ScreenRenderer::setSmoothInDeadZone(bool on)
-{
-    if (smoothInDeadZone_ == on)
-        return;
-    smoothInDeadZone_ = on;
-    update();
-}
-
-bool ScreenRenderer::smoothScalingFor(const QSize &frameSize, const QSize &targetSize) const
-{
-    if (!smooth_)
-        return false;
-    // 死区开关打开 = 不再用缩放幅度做减法（那一格值得用画质换 CPU）。
-    if (smoothInDeadZone_)
-        return true;
-    return useSmoothScalingFor(frameSize, targetSize);
-}
-
 void ScreenRenderer::setInputEnabled(bool enabled)
 {
     if (inputEnabled_ == enabled)
@@ -206,23 +188,6 @@ QRect ScreenRenderer::scaledTargetRect(const QSize &frameSize, const QSize &widg
     const int height = qMax(1, static_cast<int>(frameSize.height() * scale));
 
     return QRect((widgetSize.width() - width) / 2, (widgetSize.height() - height) / 2, width, height);
-}
-
-bool ScreenRenderer::useSmoothScalingFor(const QSize &frameSize, const QSize &targetSize)
-{
-    const qint64 frameArea  = qint64(frameSize.width())  * frameSize.height();
-    const qint64 targetArea = qint64(targetSize.width()) * targetSize.height();
-    if (frameArea <= 0 || targetArea <= 0)
-        return true;  // 尺寸非法：兜底按画质优先（正常路径已被 target.isValid() 守卫）
-
-    // 放大：必须开平滑，否则马赛克块明显。
-    if (targetArea > frameArea)
-        return true;
-
-    // 缩小：面积比 ≤ 1/9（幅度 > 3x）时双线性显著抗锯齿 ⇒ 开。
-    // 面积比落在 (1/9, 1]（与显示预算同一守卫线）时缩放幅度有限，平滑对观感改善很小
-    // 却占绘制开销的大部分（实测 4K→1x1 单格：开 7.91 ms/帧 vs 关 2.98 ms）⇒ 关。
-    return targetArea * 9 <= frameArea;
 }
 
 bool ScreenRenderer::mapToNormalized(const QPoint &widgetPos,
@@ -317,10 +282,9 @@ void ScreenRenderer::paintEvent(QPaintEvent *)
     } else {
         const QRect target = scaledTargetRect(frame_.size(), size());
         if (target.isValid()) {
-            // 死区里默认关平滑（实测省 ~2.8x 绘制耗时）；一格独享时由
-            // smoothInDeadZone_ 豁免（见 smoothScalingFor）。
-            painter.setRenderHint(QPainter::SmoothPixmapTransform,
-                                  smoothScalingFor(frame_.size(), target.size()));
+            // 缩小 / 放大一律开平滑（除非总开关被关掉）：最近邻会把汉字笔画
+            // 断成碎块、1px 线断续，这个代价不值得省，绘制开销由 bench 兜底。
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth_);
             painter.drawImage(target, frame_);
 
             if (stale_) {

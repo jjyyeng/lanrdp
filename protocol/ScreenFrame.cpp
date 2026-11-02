@@ -1,26 +1,10 @@
 #include "protocol/ScreenFrame.h"
 
+#include "protocol/LE.h"
+
 #include <cstring>
 
 namespace lanrdp {
-
-namespace {
-
-void appendU32LE(QByteArray &out, quint32 value)
-{
-    for (int i = 0; i < 4; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-quint32 readU32LE(const QByteArray &data, int offset)
-{
-    return (static_cast<quint32>(static_cast<quint8>(data.at(offset))))
-           | (static_cast<quint32>(static_cast<quint8>(data.at(offset + 1))) << 8)
-           | (static_cast<quint32>(static_cast<quint8>(data.at(offset + 2))) << 16)
-           | (static_cast<quint32>(static_cast<quint8>(data.at(offset + 3))) << 24);
-}
-
-} // namespace
 
 QByteArray encodeRawFrame(const QImage &image)
 {
@@ -37,8 +21,8 @@ QByteArray encodeRawFrame(const QImage &image)
 
     QByteArray out;
     out.reserve(kRawFrameHeaderSize + static_cast<qsizetype>(rowBytes) * height);
-    appendU32LE(out, static_cast<quint32>(width));
-    appendU32LE(out, static_cast<quint32>(height));
+    le::appendU32(out, static_cast<quint32>(width));
+    le::appendU32(out, static_cast<quint32>(height));
 
     for (int y = 0; y < height; ++y)
         out.append(reinterpret_cast<const char *>(source.constScanLine(y)), rowBytes);
@@ -51,8 +35,8 @@ QImage decodeRawFrame(const QByteArray &payload)
     if (payload.size() < kRawFrameHeaderSize)
         return {};
 
-    const quint32 width  = readU32LE(payload, 0);
-    const quint32 height = readU32LE(payload, 4);
+    const quint32 width  = le::readU32(payload, 0);
+    const quint32 height = le::readU32(payload, 4);
 
     // 防御异常尺寸，避免被伪造载荷骗出巨额分配
     if (width == 0 || height == 0 || width > 16384 || height > 16384)

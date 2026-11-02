@@ -35,21 +35,12 @@ public:
     QSize  frameSize() const { return frame_.size(); }
     bool   hasFrame() const { return !frame_.isNull(); }
 
-    // 是否**允许**平滑缩放（双线性）。默认 true（画质优先）。
-    // ⚠️ 真正是否开平滑还看缩放幅度 —— 死区里即使允许也会被 useSmoothScalingFor
-    //    自动关掉（那时平滑几乎只烧 CPU，见该函数）。
+    // 是否开平滑缩放（双线性）。默认 true，只有排查问题时才关。
+    // ⚠️ 关掉等于退回**最近邻** —— 文字会断成碎块。它不是性能开关，别长期关着。
+    // 面积比 ≤ 1/4 时解码线程已经把画面 box 缩到格子尺寸，绘制期是 1:1 贴图，
+    // 这个开关不起作用；其余缩小 / 放大都靠它。
     void setSmoothScaling(bool smooth);
     bool smoothScaling() const { return smooth_; }
-
-    // 死区（面积比 > 1/9 的缩小）里默认关平滑以省 CPU。但一格独享 / 占满时画面
-    // 只有这一份要画，省出来的 CPU 没人要，关掉反而让文字发虚 ⇒ 调用方（知道
-    // 有几格可见的那一侧）据此允许死区也开平滑。多格时保持默认。
-    void setSmoothInDeadZone(bool on);
-    bool smoothInDeadZone() const { return smoothInDeadZone_; }
-
-    // 综合「总开关 × 死区开关 × 缩放幅度」后的最终判定，paintEvent 用。
-    // 抽成函数而不是内联在 paintEvent 里，是为了让测试直接钉住这条组合逻辑。
-    bool smoothScalingFor(const QSize &frameSize, const QSize &targetSize) const;
 
     // 是否采集本控件的键鼠事件并转发为远程输入。
     // ⚠️ 关掉时会**自动补发全部抬起的键**（见 releaseAllPressed）—— 否则用户正按住的
@@ -92,11 +83,6 @@ public:
 
     // 纯函数：把 frameSize 等比缩放进 widgetSize 后的目标矩形（居中）。
     static QRect scaledTargetRect(const QSize &frameSize, const QSize &widgetSize);
-
-    // 纯函数：这次缩放是否值得开平滑（双线性）。
-    // 放大 / 大幅缩小（面积比 ≤ 1/9）⇒ true；死区（1/9 < 面积比 ≤ 1）⇒ false。
-    // 依据：死区里缩放幅度有限，平滑对观感改善很小却占绘制开销的大部分。
-    static bool useSmoothScalingFor(const QSize &frameSize, const QSize &targetSize);
 
     // 纯函数：控件坐标 -> 画面内归一化坐标（0..65535）。
     // 落在 letterbox 留白区或控件外时钳到边界；画面/控件尺寸非法时返回 false。
@@ -146,7 +132,6 @@ private:
 
     QImage  frame_;
     bool    smooth_          = true;
-    bool    smoothInDeadZone_ = false;
     bool    inputEnabled_    = false;
     bool    inputHintEnabled_ = true;   // 本格有远端可操作（预览格置 false）
     bool    dropActive_   = false;  // 拖拽悬停中：画一圈高亮描边

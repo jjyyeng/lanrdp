@@ -3,6 +3,7 @@
 #include "app/PasswordEdit.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -41,6 +42,22 @@ constexpr int kMaxPort = 65535;
 // 算得很窄，不兜底的话对话框会缩到 250px，两段话都断在词中间。
 // 两个对话框共用同一个值 —— 它们是一对，宽度不一致切换时窗口会跳。
 constexpr int kDialogMinWidth = 320;
+
+// 码率档位。这个值是**上限**（自适应只往下调、绝不上探），所以宁可给宽一点：
+// 设小了画面会长期顶在上限、糊在细节上；设大了最坏情况也不过是网络差时自己降。
+// 档位是整数倍、便于用户口算带宽占用（4 路 × 16 Mbps ≈ 64 Mbps，千兆无线压力也不大）。
+struct BitrateChoice
+{
+    int         bps;
+    const char *label;
+};
+
+constexpr BitrateChoice kBitrateChoices[] = {
+    {4 * 1000 * 1000, "4 Mbps"},
+    {8 * 1000 * 1000, "8 Mbps"},
+    {12 * 1000 * 1000, "12 Mbps"},
+    {16 * 1000 * 1000, "16 Mbps"},
+};
 
 } // namespace
 
@@ -108,11 +125,34 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
         "开启后画面先压缩再传输，可显著降低带宽占用，网络不佳时更流畅。\n"
         "仅排查问题时需要关闭。"));
 
+    bitrate_ = new QComboBox(this);
+    bitrate_->setObjectName(QStringLiteral("bitrateCombo"));
+    for (const BitrateChoice &choice : kBitrateChoices)
+        bitrate_->addItem(QString::fromLatin1(choice.label), choice.bps);
+    // 非正值按默认档处理：否则下拉里会多出一条「0.0 Mbps（当前）」，
+    // 而 config() 又把 0 兜回默认值 —— 界面与实际对不上，是最难查的那种不一致。
+    const int wantedBitrate = initial.bitrateBps > 0 ? initial.bitrateBps : Config{}.bitrateBps;
+    // 命令行 `--bitrate` 收的是任意正整数，不在档位里就补一条当前值 ——
+    // 四舍五入到最近档等于**静默改掉**用户明确设过的数字，那是另一种"不生效"。
+    if (bitrate_->findData(wantedBitrate) < 0) {
+        bitrate_->addItem(QStringLiteral("%1 Mbps（当前）")
+                              .arg(wantedBitrate / 1000000.0, 0, 'f', 1),
+                          wantedBitrate);
+    }
+    bitrate_->setCurrentIndex(bitrate_->findData(wantedBitrate));
+    bitrate_->setToolTip(QStringLiteral(
+        "画面压缩后允许通过的码率上限，实际码率会随网络状况自动下调。\n"
+        "画面越大、细节越多（如 4K），这个值越要往高选。"));
+    // 裸帧路径没有码率可调（帧直接下发，不经过编码器），勾掉压缩时这一项没有意义。
+    bitrate_->setEnabled(initial.useH264);
+    connect(h264_, &QCheckBox::toggled, bitrate_, &QWidget::setEnabled);
+
     form->addRow(QStringLiteral("监听端口"), port_);
     form->addRow(QStringLiteral("访问口令"), password_);
     form->addRow(passwordError_);   // 横跨两列（挤在字段列里会断在词中间）；平时隐藏
     form->addRow(QStringLiteral("接收目录"), dirRow);
     form->addRow(h264_);   // 横跨两列
+    form->addRow(QStringLiteral("画面码率"), bitrate_);
 
     // 防火墙提示。
     //
@@ -162,6 +202,9 @@ HostConfigDialog::Config HostConfigDialog::config() const
     c.password   = password_->text();
     c.receiveDir = recvDir_->text().trimmed();
     c.useH264    = h264_->isChecked();
+    // currentData() 只有在条目被外部清空时才会拿到无效值，兜底回默认档。
+    const int bps = bitrate_->currentData().toInt();
+    c.bitrateBps  = bps > 0 ? bps : Config{}.bitrateBps;
     return c;
 }
 

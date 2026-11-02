@@ -1,55 +1,8 @@
 #include "protocol/AudioChunk.h"
 
+#include "protocol/LE.h"
+
 namespace lanrdp {
-
-namespace {
-
-void appendU16LE(QByteArray &out, quint16 value)
-{
-    out.append(static_cast<char>(value & 0xFFu));
-    out.append(static_cast<char>((value >> 8) & 0xFFu));
-}
-
-void appendU32LE(QByteArray &out, quint32 value)
-{
-    for (int i = 0; i < 4; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-void appendU64LE(QByteArray &out, quint64 value)
-{
-    for (int i = 0; i < 8; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-quint8 readU8(const QByteArray &data, qsizetype offset)
-{
-    return static_cast<quint8>(data.at(offset));
-}
-
-quint16 readU16LE(const QByteArray &data, qsizetype offset)
-{
-    return static_cast<quint16>(readU8(data, offset))
-           | static_cast<quint16>(static_cast<quint16>(readU8(data, offset + 1)) << 8);
-}
-
-quint32 readU32LE(const QByteArray &data, qsizetype offset)
-{
-    quint32 value = 0;
-    for (int i = 0; i < 4; ++i)
-        value |= static_cast<quint32>(readU8(data, offset + i)) << (8 * i);
-    return value;
-}
-
-quint64 readU64LE(const QByteArray &data, qsizetype offset)
-{
-    quint64 value = 0;
-    for (int i = 0; i < 8; ++i)
-        value |= static_cast<quint64>(readU8(data, offset + i)) << (8 * i);
-    return value;
-}
-
-} // namespace
 
 qint64 audioBlockAlign(const AudioFormat &format)
 {
@@ -87,10 +40,10 @@ QByteArray encodeAudioConfig(const AudioFormat &format)
     QByteArray out;
     out.reserve(kAudioConfigSize);
     out.append(static_cast<char>(kAudioConfigVersion));
-    appendU32LE(out, format.sampleRate);
+    le::appendU32(out, format.sampleRate);
     out.append(static_cast<char>(format.channels));
     out.append(static_cast<char>(format.bitsPerSample));
-    appendU16LE(out, format.blockMs);
+    le::appendU16(out, format.blockMs);
     return out;
 }
 
@@ -99,14 +52,14 @@ std::optional<AudioFormat> decodeAudioConfig(const QByteArray &payload)
     // 长度必须精确匹配：多出来的字节说明对端与本端的布局认知已经不一致了。
     if (payload.size() != kAudioConfigSize)
         return std::nullopt;
-    if (readU8(payload, 0) != kAudioConfigVersion)
+    if (le::readU8(payload, 0) != kAudioConfigVersion)
         return std::nullopt;
 
     AudioFormat format;
-    format.sampleRate    = readU32LE(payload, 1);
-    format.channels      = readU8(payload, 5);
-    format.bitsPerSample = readU8(payload, 6);
-    format.blockMs       = readU16LE(payload, 7);
+    format.sampleRate    = le::readU32(payload, 1);
+    format.channels      = le::readU8(payload, 5);
+    format.bitsPerSample = le::readU8(payload, 6);
+    format.blockMs       = le::readU16(payload, 7);
 
     if (!isValidAudioFormat(format))
         return std::nullopt;
@@ -117,7 +70,7 @@ QByteArray encodeAudioData(qint64 tsMs, const QByteArray &pcm)
 {
     QByteArray out;
     out.reserve(kAudioDataHeaderSize + pcm.size());
-    appendU64LE(out, static_cast<quint64>(tsMs));
+    le::appendU64(out, static_cast<quint64>(tsMs));
     out.append(pcm);
     return out;
 }
@@ -143,7 +96,7 @@ std::optional<AudioChunk> decodeAudioData(const QByteArray &payload, const Audio
     }
 
     AudioChunk chunk;
-    chunk.tsMs = static_cast<qint64>(readU64LE(payload, 0));
+    chunk.tsMs = static_cast<qint64>(le::readU64(payload, 0));
     chunk.pcm  = payload.mid(kAudioDataHeaderSize);
     return chunk;
 }

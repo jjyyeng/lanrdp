@@ -1,24 +1,12 @@
 #include "protocol/H264Frame.h"
 
+#include "protocol/LE.h"
+
 namespace lanrdp {
 
 namespace {
 
 constexpr quint8 kFlagKeyframe = 1u << 0;
-
-void appendU32LE(QByteArray &out, quint32 value)
-{
-    for (int i = 0; i < 4; ++i)
-        out.append(static_cast<char>((value >> (8 * i)) & 0xFFu));
-}
-
-quint32 readU32LE(const QByteArray &data, int offset)
-{
-    return (static_cast<quint32>(static_cast<quint8>(data.at(offset))))
-           | (static_cast<quint32>(static_cast<quint8>(data.at(offset + 1))) << 8)
-           | (static_cast<quint32>(static_cast<quint8>(data.at(offset + 2))) << 16)
-           | (static_cast<quint32>(static_cast<quint8>(data.at(offset + 3))) << 24);
-}
 
 } // namespace
 
@@ -33,8 +21,8 @@ QByteArray encodeH264Frame(const H264Frame &frame)
 
     QByteArray out;
     out.reserve(kH264FrameHeaderSize + frame.bitstream.size());
-    appendU32LE(out, frame.width);
-    appendU32LE(out, frame.height);
+    le::appendU32(out, frame.width);
+    le::appendU32(out, frame.height);
     out.append(static_cast<char>(frame.keyframe ? kFlagKeyframe : 0u));
     out.append(frame.bitstream);
     return out;
@@ -45,8 +33,8 @@ std::optional<H264Frame> decodeH264Frame(const QByteArray &payload)
     if (payload.size() <= kH264FrameHeaderSize)
         return std::nullopt;
 
-    const quint32 width  = readU32LE(payload, 0);
-    const quint32 height = readU32LE(payload, 4);
+    const quint32 width  = le::readU32(payload, 0);
+    const quint32 height = le::readU32(payload, 4);
 
     if (width == 0 || height == 0)
         return std::nullopt;

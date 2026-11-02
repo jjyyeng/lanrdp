@@ -23,6 +23,8 @@ struct HostSession {
     QString password;
     QString receiveDir;
     bool    useH264 = true;
+    // 压缩码率上限（bps）。老版本 ini 里没有这个键，读到默认值即可。
+    int     bitrateBps = 8 * 1000 * 1000;
 };
 
 struct PeerSession {

@@ -181,13 +181,18 @@ void ClientConnection::connectTo(const QString &host, quint16 port, const QStrin
             authClient_->start();
     });
 
-    connect(socket, &QAbstractSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+    connect(socket, &QAbstractSocket::errorOccurred, this, [this, socket](QAbstractSocket::SocketError) {
+        // 只结算「当前这条连接」的错误。旧 socket 在 teardown() 之后不是立刻销毁的
+        //（Session 走 deleteLater），它迟到的错误会打进新一轮尝试 —— 而那时
+        // handshakeReported_ 已被 connectTo() 复位，于是新连接被误判成失败；
+        // 等真握手成功时又会被 handshakeReported_ 挡在门外，画面永远不来。
+        if (!isCurrentSocket(session_, socket))
+            return;
+
         if (!handshakeReported_) {
             handshakeReported_ = true;
             ready_             = false;
-            const QString error = (session_ && session_->socket())
-                                      ? session_->socket()->errorString()
-                                      : QStringLiteral("socket error");
+            const QString error = socket->errorString();
             emit logMessage(QStringLiteral("连接失败：%1").arg(error));
             emit statusMessage(QStringLiteral("连接失败"));
             emit stateChanged();
@@ -644,6 +649,11 @@ bool ClientConnection::isDeadLink(bool hasReceived, qint64 msSinceLastRx,
 {
     return hasReceived ? (msSinceLastRx > deadTimeoutMs)
                        : (attemptElapsedMs > deadTimeoutMs);
+}
+
+bool ClientConnection::isCurrentSocket(const Session *session, const QAbstractSocket *socket)
+{
+    return session && socket && session->socket() == socket;
 }
 
 // 3 s 一次：发一帧心跳（让对方知道我们还在），并检查对方是否还在。

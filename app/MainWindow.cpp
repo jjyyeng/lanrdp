@@ -158,6 +158,7 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         hostPassword_ = host.password;
         hostRecvDir_  = host.receiveDir;
         hostUseH264_  = host.useH264;
+        hostBitrate_  = host.bitrateBps;
 
         const lanrdp::PeerSession peer = sessionStore_.loadPeer();
         peerHost_     = peer.host;
@@ -748,7 +749,6 @@ void MainWindow::toggleMaximize(lanrdp::RemoteView *view)
         view->renderer()->setFocus(Qt::OtherFocusReason);
 
     syncMaximizeState();
-    updateSmoothDeadZone();   // 占满/还原会改变「有几个可见」⇒ 死区平滑开关跟着走
     scheduleDisplayBudget();
     log(wasMaximizedHere ? QStringLiteral("已还原多格布局")
                          : QStringLiteral("第 %1 格已占满").arg(index + 1));
@@ -763,7 +763,6 @@ void MainWindow::restoreMaximize(lanrdp::RemoteView *view)
 
     grid_->setMaximizedIndex(-1);
     syncMaximizeState();
-    updateSmoothDeadZone();
     scheduleDisplayBudget();
     log(QStringLiteral("已还原多格布局（Esc）"));
 }
@@ -980,19 +979,6 @@ void MainWindow::refreshViewUi()
     // 「谁是占满格 / 能不能占满」和格子状态同一批刷 —— 触发条件有重叠
     //（格数一变，入口的可用性与占满索引的合法性都可能跟着变）。
     syncMaximizeState();
-    updateSmoothDeadZone();
-}
-
-// 只有一格可见（本就一格 / 占满）时，允许渲染器在死区也开平滑。
-// 死区关平滑是为了省多路的绘制开销；一格独享时那个 CPU 没人要，关掉反而让
-// 2560→1100 这类常见缩小退化成最近邻、文字发虚。要跟「可见格数」走，所以单列。
-void MainWindow::updateSmoothDeadZone()
-{
-    const bool solo = (views_.size() <= 1) || (grid_ && grid_->isMaximized());
-    for (lanrdp::RemoteView *v : std::as_const(views_)) {
-        if (v && v->renderer())
-            v->renderer()->setSmoothInDeadZone(solo);
-    }
 }
 
 // 「视图」菜单 —— 悬浮条的显隐入口。
@@ -1068,11 +1054,9 @@ void MainWindow::showEvent(QShowEvent *event)
 // 4K@150% 上等于把画面再放大 1.5 倍，肉眼可见变糊（比不缩还差）。
 // 给物理像素 ⇒ 解码结果永远 ≥ 实际绘制尺寸，只缩不放，质量不退化。
 //
-// ⚠️⚠️ 还没定档的一件事（留到用 bench_decode_multi 实测后再定，别凭感觉改）：
-// `nv12ToArgb32Scaled` 的收益守卫是**面积比 ≤ 1/9**，落在 (1/9, 1/4] 这一带
-// 既省不下来、又拿不到「不缩放」的好处。4K 屏上做 2×2 时单格正好是源的 1/4，
-// 恰好踩在死区里 —— 于是「按格子取」在这档会退化成 no-op（安全，但没收益），
-// 而「按窗口取」会让每次切布局都要等一帧新尺寸的画面。两条路的取舍要拿实测说话。
+// ⚠️ 预算的面积比落在 (1/4, 1] 时 `nv12ToArgb32Scaled` 会退回全尺寸，那点缩小交给
+// QPainter 做双线性（UI 线程 3.61 ms/帧）。1/4 以下才真的在解码线程缩掉（box）。
+// 这条线只决定「谁来做、快不快」，与画质无关 —— 绘制期一律平滑，没有最近邻档。
 void MainWindow::pushDisplayBudget()
 {
     for (lanrdp::RemoteView *v : std::as_const(views_)) {
@@ -1370,6 +1354,7 @@ void MainWindow::openHostConfigDialog()
     cfg.password   = hostPassword_;
     cfg.receiveDir = hostRecvDir_;
     cfg.useH264    = hostUseH264_;
+    cfg.bitrateBps = hostBitrate_;
 
     lanrdp::HostConfigDialog dlg(cfg, this);
     if (dlg.exec() != QDialog::Accepted)
@@ -1381,7 +1366,8 @@ void MainWindow::openHostConfigDialog()
     hostRecvDir_  = picked.receiveDir.trimmed().isEmpty()
                         ? lanrdp::defaultReceiveDir()
                         : picked.receiveDir.trimmed();
-    setHostCodec(picked.useH264, hostBitrate_);
+    hostBitrate_  = picked.bitrateBps;
+    setHostCodec(picked.useH264, picked.bitrateBps);
 
     // 记住这套参数，下次打开对话框直接预填（口令在其中，ini 里是 DPAPI 密文）。
     // 写不进去要**说出来**：静默失败会让用户以为"记住了"，下次开程序发现又空了却
@@ -1392,6 +1378,7 @@ void MainWindow::openHostConfigDialog()
         saved.password   = hostPassword_;
         saved.receiveDir = hostRecvDir_;
         saved.useH264    = hostUseH264_;
+        saved.bitrateBps = hostBitrate_;
         if (!sessionStore_.saveHost(saved)) {
             log(QStringLiteral("⚠ 无法保存会话参数（%1），下次启动需要重新填写。")
                     .arg(sessionStore_.filePath()));

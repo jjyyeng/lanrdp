@@ -27,7 +27,7 @@ private slots:
     void scaledConversionNeverUpscales();
     void scaledConversionSamplesSourceRegion();
     void scaledConversionFallsBackOnDegenerateBox();
-    // 收益守卫的阈值定档（1/9）：面积比 > 1/9 回退全尺寸，恰好 1/9 仍缩
+    // 收益守卫的阈值定档（1/4）：面积比 > 1/4 回退全尺寸，恰好 1/4 仍缩
     void scaledConversionSkipsWhenNotWorthIt();
     void scaledConversionThresholdBoundaryIsInclusive();
 };
@@ -328,13 +328,15 @@ void TestColorConvert::scaledConversionFallsBackOnDegenerateBox()
 
 void TestColorConvert::scaledConversionSkipsWhenNotWorthIt()
 {
-    // 收益守卫的**边界**：box 平均要给每个输出像素额外交「4 次取样 + 乘倒数」的开销，
-    // 只有输出面积远小于源时才划算。实测（A2b 细扫，1080p 与 4K 曲线几乎重合）：
-    // 面积比 1/4 -> 0.53x ｜ 1/6 -> 0.75x ｜ 1/8 -> 0.94x ｜ 1/9 -> 1.06x ｜ 1/16 -> 1.63x
-    // ⇒ 盈亏平衡在 1/9，守卫取 `dstArea * 9 > srcArea` 就退回全尺寸。
+    // 收益守卫的**边界**：box 平均要给每个输出像素额外交「4 次取样 + 乘倒数」的开销。
+    // 2026-11-01 重测（映射表预计算已生效，40 次平均、Release 口径）：
+    // 面积比 1/4 上缩放比全尺寸快 1.13x（1440p）/ 1.29x（4K），1/9 上快 2.3x
+    // ⇒ 阈值放宽到 1/4，守卫取 `dstArea * 4 > srcArea` 就退回全尺寸。
+    // 1/4 以上没测，所以不越界。
     //
-    // ⚠️ 这条用例的价值在**卡住阈值本身**：旧值是 1/4，而「1/2 线性尺寸」（面积比恰好 1/4）
-    // 是曲线上的**最差点**（慢一倍），且 4K 流到 4K 屏做 2×2 格子时预算正好落在那里。
+    // ⚠️ 这条用例的价值在**卡住阈值本身**。旧值是 1/9，依据是「1/4 慢一倍」那张表 ——
+    // 那是映射表预计算之前的产物，方向反了。放宽的直接收益是面积比 (1/9, 1/4] 的多格
+    // 不再落到「解码不缩 + 绘制也不平滑」的最近邻档。
     const QByteArray src  = makeBgra(320, 240, solid(320, 240, qRgb(90, 140, 190)));
     const QByteArray nv12 = lanrdp::bgraToNv12(
         reinterpret_cast<const uchar *>(src.constData()), 320 * 4, 320, 240);
@@ -343,30 +345,30 @@ void TestColorConvert::scaledConversionSkipsWhenNotWorthIt()
     // 面积比 0.88（轻微缩小）-> 不缩，返回原尺寸
     QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 320, 320, 240, 300, 226).size(), QSize(320, 240));
 
-    // **面积比恰好 1/4**（160x120，= 1/2 线性尺寸）-> 不缩
-    // —— 旧守卫写 `> 4 * srcArea` 时这一点会走缩放路径，正是被修掉的那个反向异常
-    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 320, 320, 240, 160, 120).size(), QSize(320, 240));
+    // **面积比恰好 1/4**（160x120，= 1/2 线性尺寸）-> 缩（`<=` 含等号）
+    // —— 旧守卫写 `> 9 * srcArea` 时这一点会退回全尺寸
+    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 320, 320, 240, 160, 120).size(), QSize(160, 120));
 
-    // 面积比 1/7.1（120x90，仍在阈值之上）-> 不缩
-    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 320, 320, 240, 120, 90).size(), QSize(320, 240));
+    // 面积比 1/7.1（120x90，阈值之内）-> 缩
+    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 320, 320, 240, 120, 90).size(), QSize(120, 90));
 
-    // 面积比 1/16（80x60，明显值得）-> 真缩
+    // 面积比 1/16（80x60，明显值得）-> 缩
     QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 320, 320, 240, 80, 60).size(), QSize(80, 60));
 }
 
 void TestColorConvert::scaledConversionThresholdBoundaryIsInclusive()
 {
-    // 阈值是「面积比 ≤ 1/9 就缩」，所以**恰好 1/9** 必须缩（实测 1.06x，仍赚且输出更小）。
-    // 用 240x240 → 80x80（= 1/9 面积，整数无取整误差）卡死这条边界。
+    // 阈值是「面积比 ≤ 1/4 就缩」，所以**恰好 1/4** 必须缩。
+    // 用 240x240 → 120x120（= 1/4 面积，整数无取整误差）卡死这条边界。
     const QByteArray src  = makeBgra(240, 240, solid(240, 240, qRgb(200, 120, 40)));
     const QByteArray nv12 = lanrdp::bgraToNv12(
         reinterpret_cast<const uchar *>(src.constData()), 240 * 4, 240, 240);
     const auto p = reinterpret_cast<const uchar *>(nv12.constData());
 
-    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 240, 240, 240, 80, 80).size(), QSize(80, 80));
+    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 240, 240, 240, 120, 120).size(), QSize(120, 120));
 
-    // 差一点点（81x81 -> 面积比 0.114 > 1/9）就该回退，说明边界是**卡在 1/9** 而不是更宽
-    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 240, 240, 240, 81, 81).size(), QSize(240, 240));
+    // 差一点点（121x121 -> 面积比 0.254 > 1/4）就该回退，说明边界是**卡在 1/4** 而不是更宽
+    QCOMPARE(lanrdp::nv12ToArgb32Scaled(p, 240, 240, 240, 121, 121).size(), QSize(240, 240));
 }
 
 QTEST_GUILESS_MAIN(TestColorConvert)

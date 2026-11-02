@@ -40,6 +40,7 @@ lanrdp::HostSession sampleHost()
     session.password   = QStringLiteral("secret7");
     session.receiveDir = QStringLiteral("D:/tmp/received");
     session.useH264    = false;
+    session.bitrateBps = 12 * 1000 * 1000;
     return session;
 }
 
@@ -75,6 +76,7 @@ void TestSessionStore::roundTripsHostSession()
     QCOMPARE(out.password, in.password);
     QCOMPARE(out.receiveDir, in.receiveDir);
     QCOMPARE(out.useH264, in.useH264);
+    QCOMPARE(out.bitrateBps, in.bitrateBps);
 }
 
 void TestSessionStore::roundTripsPeerSession()
@@ -157,12 +159,22 @@ void TestSessionStore::fallsBackOnInsaneValues()
         ini.setValue(QStringLiteral("host/port"), 0);
         ini.setValue(QStringLiteral("peer/port"), 70000);
         ini.setValue(QStringLiteral("peer/host"), QStringLiteral("   "));
+        // 码率：0 会被编码器的下限静默抬成 100 kbps，10 位数字则是胡说 —— 两者都退回默认。
+        ini.setValue(QStringLiteral("host/bitrateBps"), 0);
         ini.sync();
     }
 
     QCOMPARE(store.loadHost().port, quint16(9000));   // qint16 的下界以下
     QCOMPARE(store.loadPeer().port, quint16(9000));   // 越界
     QCOMPARE(store.loadPeer().host, QStringLiteral("127.0.0.1"));   // 全空白
+    QCOMPARE(store.loadHost().bitrateBps, 8 * 1000 * 1000);
+
+    {
+        QSettings ini(store.filePath(), QSettings::IniFormat);
+        ini.setValue(QStringLiteral("host/bitrateBps"), 100 * 1000 * 1000 + 1);
+        ini.sync();
+    }
+    QCOMPARE(store.loadHost().bitrateBps, 8 * 1000 * 1000);
 }
 
 // 空路径 = 停用。测试与自动化默认走这条，它们绝不能读写真实配置。

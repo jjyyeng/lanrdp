@@ -122,9 +122,9 @@ int main(int argc, char **argv)
     const int repeats = (argc > 5) ? QString::fromLocal8Bit(argv[5]).toInt() : kDefaultRepeats;
     const int roads   = (argc > 6) ? QString::fromLocal8Bit(argv[6]).toInt() : kDefaultRoads;
     // 第 7 个参数：显示预算的除数（1 = 不缩放，2 = 半尺寸，4 = 四分之一尺寸…）
-    // ⚠️ 默认 4 而不是 2：**除数 2 = 面积比 1/4 = 收益曲线上的最差点**（实测 0.53x，
-    // 比不缩还慢一倍），函数会刻意回退全尺寸 —— 拿它当默认会量出「预算毫无作用」的假象。
-    // 除数 4（面积比 1/16）才落在真省钱的区间（1.62x）。面积比 ≤ 1/9 才值得缩。
+    // 收益守卫是「面积比 ≤ 1/4 才缩」，所以除数 2（面积比 1/4）会缩、除数 4（1/16）缩得更多。
+    // ⚠️ 2026-11-01 重测后阈值由 1/9 放宽到 1/4：以前这里写「除数 2 比不缩还慢一倍」，
+    // 那是映射表预计算之前的数（实测 0.53x 方向记反），现在面积比 1/4 上缩放快 1.29x。
     const int div     = (argc > 7) ? QString::fromLocal8Bit(argv[7]).toInt() : 4;
 
     QTextStream ts(stdout);
