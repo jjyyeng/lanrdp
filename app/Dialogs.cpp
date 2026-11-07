@@ -343,6 +343,22 @@ SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
         "需先点击画面取得焦点，键盘操作方可生效。\n"
         "关闭后，本机操作不影响对方。"));
 
+    tray_ = new QCheckBox(QStringLiteral("最小化时收进通知区域"), this);
+    tray_->setObjectName(QStringLiteral("trayResidentCheck"));
+    tray_->setChecked(initial.trayResident);
+    tray_->setToolTip(QStringLiteral(
+        "开启后，最小化窗口会收进屏幕右下角的通知区域，任务栏上不再占位置。\n"
+        "双击通知区域的图标即可恢复窗口；右键图标可停止共享或退出程序。\n"
+        "收进通知区域期间，程序仍在后台运行。"));
+
+    singleInstance_ = new QCheckBox(QStringLiteral("只允许运行一个程序窗口"), this);
+    singleInstance_->setObjectName(QStringLiteral("singleInstanceCheck"));
+    singleInstance_->setChecked(initial.singleInstance);
+    singleInstance_->setToolTip(QStringLiteral(
+        "开启后，再次启动程序不会开出第二个窗口，而是把已有的这个叫到前台。\n"
+        "适合常驻后台共享时防止误开多个程序。\n"
+        "命令行方式（脚本自测）不受此限制。"));
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
@@ -357,6 +373,8 @@ SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     auto *box = new QVBoxLayout(this);
     box->addWidget(autoReconnect_);
     box->addWidget(input_);
+    box->addWidget(tray_);
+    box->addWidget(singleInstance_);
     box->addWidget(hint);
     box->addWidget(buttons);
 }
@@ -364,8 +382,10 @@ SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
 SettingsDialog::Config SettingsDialog::config() const
 {
     Config c;
-    c.autoReconnect = autoReconnect_->isChecked();
-    c.inputEnabled  = input_->isChecked();
+    c.autoReconnect   = autoReconnect_->isChecked();
+    c.inputEnabled    = input_->isChecked();
+    c.trayResident    = tray_->isChecked();
+    c.singleInstance  = singleInstance_->isChecked();
     return c;
 }
 

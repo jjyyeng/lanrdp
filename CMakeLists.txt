@@ -76,6 +76,12 @@ add_library(lanrdp_core STATIC
     # 放 core 才能被 test_sessionstore 直链 —— 落盘逻辑最需要单测，
     # 却又最容易被"只能从 UI 走一遍"挡在门外。
     app/SessionStore.cpp
+    # 窗口标题与任务栏角标的判据。纯函数、只依赖 QString，放 core 是为了能
+    # 直接单测：「本机此刻是否正在被看」不允许靠肉眼看窗口去验证。
+    app/WindowStatus.cpp
+    # 单实例协调（QLocalServer 命名管道，fail-open）。只依赖 QtNetwork，
+    # 放 core 让 test_singleinstance 直链。
+    app/SingleInstance.cpp
 )
 target_include_directories(lanrdp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lanrdp_core PUBLIC
@@ -109,6 +115,12 @@ endif()
 #    （core 不依赖 Qt Widgets），所以哪些目标用到 MainWindow，就得把它们一并列进来。
 set(LANRDP_UI_SOURCES
     app/MainWindow.cpp
+    # 任务栏按钮角标（ITaskbarList3::SetOverlayIcon）+ 接入时闪任务栏。
+    # 依赖 QWidget 取 HWND / DPR，所以只能进 UI 源。
+    app/TaskbarBadge.cpp
+    # 通知区域常驻图标（QSystemTrayIcon）。只在「关闭窗口后继续共享」打开时
+    # 才真的创建，关着的时候它只是个不碰平台的状态记录器。
+    app/TrayController.cpp
     # 界面外观：深色 palette + 全局 QSS + 悬浮条内务样式（色值的唯一出处）
     app/Theme.cpp
     # 矢量图标（QPainterPath 按 24 格绘制）：不依赖 qrc / qsvgicon 插件，
@@ -240,6 +252,26 @@ add_test(NAME test_audiojitter COMMAND test_audiojitter)
 add_executable(test_screencontrol tests/test_screencontrol.cpp)
 target_link_libraries(test_screencontrol PRIVATE lanrdp_core Qt6::Test)
 add_test(NAME test_screencontrol COMMAND test_screencontrol)
+
+# 窗口标题 / 任务栏角标的判据（纯函数：谁在看、显示成什么文案）
+add_executable(test_windowstatus tests/test_windowstatus.cpp)
+target_link_libraries(test_windowstatus PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_windowstatus COMMAND test_windowstatus)
+
+# 通知区域图标：状态点 / 悬停提示 / 无托盘环境下的状态记录。
+# 需要 Widgets（QSystemTrayIcon），所以把它的三个依赖源一并列进来。
+add_executable(test_traycontroller tests/test_traycontroller.cpp
+    app/TrayController.cpp
+    app/Glyph.cpp
+    app/Theme.cpp
+)
+target_link_libraries(test_traycontroller PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_traycontroller COMMAND test_traycontroller)
+
+# 单实例协调：命名管道监听 / 新实例探测 / fail-open / 名字释放
+add_executable(test_singleinstance tests/test_singleinstance.cpp)
+target_link_libraries(test_singleinstance PRIVATE lanrdp_core Qt6::Test)
+add_test(NAME test_singleinstance COMMAND test_singleinstance)
 
 # 被控端音频扇出（真 loopback 连接：目标管理 / 格式补发 / 背压丢块）
 add_executable(test_audiostreamer tests/test_audiostreamer.cpp)
@@ -440,6 +472,9 @@ set(_lanrdp_qt_tests
     test_viewgrid
     test_adaptive
     test_theme
+    test_windowstatus
+    test_traycontroller
+    test_singleinstance
 )
 
 get_property(_lanrdp_registered DIRECTORY PROPERTY TESTS)

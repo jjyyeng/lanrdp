@@ -16,7 +16,11 @@
 
 #include "app/Dialogs.h"
 #include "app/Glyph.h"
+#include "app/SingleInstance.h"
+#include "app/TaskbarBadge.h"
 #include "app/Theme.h"
+#include "app/TrayController.h"
+#include "app/WindowStatus.h"
 #include "host/HostController.h"
 #include "net/ClientConnection.h"
 #include "net/ClipboardSync.h"
@@ -172,6 +176,26 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     // 「连接对象存在但其实空闲」的中间态。
     buildUi();          // 建视窗 + 接线（含每格的条上控件与网格选中）
     setupClipboard();   // 剪贴板同步（仅文本）
+
+    // ---- 任务栏角标 ----
+    // 窗口最小化、或者被别的窗口挡住时，机主还能看到的只剩任务栏按钮 ——
+    // 角标就贴在那儿。拿不到任务栏接口（老系统 / COM 起不来）时静默降级，
+    // 没有角标不影响监听与画面。这一步同时把初始标题贴上去。
+    taskbarBadge_ = std::make_unique<lanrdp::TaskbarBadge>(this);
+    updateWindowChrome();
+
+    // ---- 通知区域常驻图标 ----
+    // 只建对象，不挂图标：开关默认关着，而「默认关」必须是真的一个平台调用都不发。
+    // 三个菜单动作直接接到既有路径上 —— 停止共享走 stopHost()（真停监听），
+    // 不是 dropAllClients()，后者踢了人还能再连进来，叫「停止共享」名不副实。
+    tray_ = std::make_unique<lanrdp::TrayController>();
+    connect(tray_.get(), &lanrdp::TrayController::restoreRequested, this,
+            [this]() { bringToFront(); });
+    connect(tray_.get(), &lanrdp::TrayController::stopSharingRequested, this,
+            [this]() { stopHost(); });
+    connect(tray_.get(), &lanrdp::TrayController::quitRequested, this, []() {
+        QCoreApplication::quit();
+    });
 
     // ---- 音频播放（对方的声音）----
     // 单实例：只有选中格那一格出声。**构造时不碰任何设备** —— 第一次 `begin()`
@@ -1043,6 +1067,147 @@ void MainWindow::showEvent(QShowEvent *event)
     pushDisplayBudget();
 }
 
+// 最小化时收进通知区域。
+//
+// 只有「开关打开 + 这台机器真有通知区域」两条同时成立才藏。少了后一条，
+// 窗口会凭空消失而没有任何地方能把它叫回来 —— 那比占着任务栏糟糕得多。
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+
+    if (event->type() != QEvent::WindowStateChange)
+        return;
+    if (!lanrdp::hideToTrayOnMinimize(trayResident_, tray_ && tray_->isVisible(),
+                                      isMinimized()))
+        return;
+
+    // hide() 而不是继续最小化：最小化只是把窗口缩到任务栏，任务栏按钮还在；
+    // 收进通知区域要的是「任务栏上不留东西」，那只剩 hide()。
+    hide();
+
+    // 第一次收进托盘要说一声：Win11 默认把新图标塞进任务栏的隐藏图标区，
+    // 不说的话用户只看见窗口不见了。只提示一次，每次最小化都弹就是骚扰。
+    if (!trayHintShown_ && tray_) {
+        trayHintShown_ = true;
+        tray_->notify(QStringLiteral("仍在后台运行"),
+                      QStringLiteral("图标可能收在任务栏右下角的隐藏图标里，"
+                                     "双击它即可恢复窗口。"));
+    }
+}
+
+// 关闭窗口的两种含义。
+//
+// 正在待客 / 正在被看时，关窗只把脸收起来 —— 同事那边还连着，断掉不是他点的意思。
+// 什么都没干时关窗就是退出：藏起来会变成「我以为退了，其实还有一个在后台等人连」。
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    const bool hostBusy = hostState_.listening || !hostState_.clients.isEmpty();
+    const bool trayUp   = tray_ && tray_->isVisible();
+
+    if (lanrdp::closeAction(trayResident_, trayUp, hostBusy) != lanrdp::CloseAction::HideToTray) {
+        QMainWindow::closeEvent(event);
+        return;
+    }
+
+    event->ignore();
+    hide();
+
+    if (tray_)
+        tray_->notify(QStringLiteral("仍在后台共享"),
+                      hostState_.clients.isEmpty()
+                          ? QStringLiteral("还在等待同事连接。要彻底退出，请在托盘图标上选【退出】。")
+                          : QStringLiteral("同事仍能看到本机画面。要彻底停止，请在托盘图标上选"
+                                           "【停止共享】或【退出】。"));
+}
+
+void MainWindow::applyTrayResident(bool on)
+{
+    trayResident_ = on;
+
+    if (!tray_)
+        return;
+
+    tray_->setVisible(on);
+    if (!on)
+        return;
+
+    // 图标登记是异步的，刚发完请求还问不出结果 —— 等它落定再判断，
+    // 免得「刚挂上就被宣布挂不上」。
+    QTimer::singleShot(1000, this, [this]() {
+        if (trayResident_ && tray_ && !tray_->isVisible()) {
+            // 没有通知区域，或者图标被外壳拒收（进程完整性不足）。说清楚，别让人
+            // 以为勾了就有 —— 这种情况下最小化只是普通最小化，窗口还在任务栏上。
+            log(QStringLiteral("最小化时收不进托盘：通知区域不可用，窗口会留在任务栏"));
+        }
+    });
+
+    // 刚挂出来时补一次状态：此前图标不存在，setStatus 只记在对象里。
+    updateWindowChrome();
+}
+
+void MainWindow::applySingleInstance(bool on)
+{
+    singleInstance_ = on;
+
+    if (on && !singleGuard_) {
+        singleGuard_ = std::make_unique<lanrdp::SingleInstanceGuard>();
+        connect(singleGuard_.get(), &lanrdp::SingleInstanceGuard::raiseRequested, this,
+                [this]() { bringToFront(); });
+    }
+
+    if (!singleGuard_)
+        return;
+
+    if (on) {
+        if (!singleGuard_->listen(lanrdp::singleInstanceKey())) {
+            // fail-open：监听建不起来就当没有这功能，绝不能反过来把启动拦掉。
+            log(QStringLiteral("未能开启单实例保护，本程序仍允许多开"));
+        }
+    } else {
+        singleGuard_->stop();
+    }
+}
+
+namespace {
+
+// 把窗口夺到前台。
+//
+// Windows 的前台锁只放行「自己已经持有前台」或「刚收到用户输入」的进程，而叫醒
+// 本程序的那一刻，前台往往停在别的程序上 —— 单纯 SetForegroundWindow 会被静默
+// 拒绝：窗口回来了、焦点却还在原处（「收进托盘后被叫醒」这条路径实测复现）。
+// 临时把自己挂到前台线程的输入队列上再夺，是绕开这条限制的常规做法，用完立刻
+// 解挂，不污染后续的输入处理。
+void forceForeground(WId wid)
+{
+    const HWND hwnd = reinterpret_cast<HWND>(wid);
+    if (!hwnd || ::SetForegroundWindow(hwnd))
+        return;
+
+    const HWND foreground = ::GetForegroundWindow();
+    if (!foreground)
+        return;
+
+    const DWORD foregroundThread = ::GetWindowThreadProcessId(foreground, nullptr);
+    const DWORD selfThread       = ::GetCurrentThreadId();
+    if (!foregroundThread || foregroundThread == selfThread)
+        return;
+
+    ::AttachThreadInput(foregroundThread, selfThread, TRUE);
+    ::BringWindowToTop(hwnd);
+    ::SetForegroundWindow(hwnd);
+    ::AttachThreadInput(foregroundThread, selfThread, FALSE);
+}
+
+} // namespace
+
+void MainWindow::bringToFront()
+{
+    showNormal();
+    raise();
+    activateWindow();
+    forceForeground(winId());
+}
+
 // 把「显示预算」下发给每一格连接的解码器。
 //
 // 口径变成**格子尺寸**（每格自己的 renderer 尺寸）：一控多时 4 路都按
@@ -1436,8 +1601,10 @@ void MainWindow::openConnectDialog()
 void MainWindow::openSettingsDialog()
 {
     lanrdp::SettingsDialog::Config cfg;
-    cfg.autoReconnect = autoReconnectEnabled();
-    cfg.inputEnabled  = inputEnabled_;
+    cfg.autoReconnect   = autoReconnectEnabled();
+    cfg.inputEnabled    = inputEnabled_;
+    cfg.trayResident    = trayResident_;
+    cfg.singleInstance  = singleInstance_;
 
     lanrdp::SettingsDialog dlg(cfg, this);
     if (dlg.exec() != QDialog::Accepted)
@@ -1451,6 +1618,12 @@ void MainWindow::openSettingsDialog()
 
     if (picked.autoReconnect != autoReconnectEnabled())
         onAutoReconnectToggled(picked.autoReconnect);
+
+    if (picked.trayResident != trayResident_)
+        applyTrayResident(picked.trayResident);
+
+    if (picked.singleInstance != singleInstance_)
+        applySingleInstance(picked.singleInstance);
 }
 
 // 把「启用远程键鼠控制」总开关注入到**每一格**（连接 + 渲染器）。
@@ -1810,6 +1983,41 @@ void MainWindow::refreshClientList()
         btn->setEnabled(count > 0);
         btn->setToolTip(tip);
     }
+
+    updateWindowChrome();
+}
+
+// 「本机此刻是否正在被看」—— 窗口标题与任务栏角标是机主在窗口最小化、或被别的
+// 窗口挡住时唯一还能看到的东西。判据全在 WindowStatus 里（纯函数，可单测），
+// 这里只负责把结果贴到窗口上。
+void MainWindow::updateWindowChrome()
+{
+    const int     count     = hostState_.clients.size();
+    const QString firstPeer = count > 0 ? hostState_.clients.first().peer : QString();
+
+    setWindowTitle(lanrdp::hostWindowTitle(hostState_.listening, count, firstPeer));
+
+    // 托盘图标说同一件事：有人正在看时带红点，光在等客时只有一个屏幕轮廓。
+    // 不可见时 setStatus 只记录状态，不碰平台。
+    if (tray_)
+        tray_->setStatus(count > 0 ? lanrdp::TrayStatus::Shared
+                                   : lanrdp::TrayStatus::Listening,
+                         count, firstPeer);
+
+    if (!taskbarBadge_)
+        return;
+
+    const int badge = lanrdp::hostBadgeCount(hostState_.listening, count);
+    taskbarBadge_->setCount(badge,
+                            count > 0
+                                ? QStringLiteral("正在被 %1 个连接查看本机").arg(count)
+                                : QStringLiteral("没有控制端连接"));
+
+    // 只在「从没人看变成有人看」的那一下闪任务栏。每次刷新都闪就成了干扰，
+    // 而状态快照本来就是每秒一帧。
+    if (badge > 0 && lastBadgeCount_ == 0)
+        taskbarBadge_->flash();
+    lastBadgeCount_ = badge;
 }
 
 // 把「键鼠是否已锁定」同步到【被控】菜单的双态项上
@@ -2102,6 +2310,10 @@ void MainWindow::updateConnectionUi()
     // 分两处写迟早会漏一处。
     refreshViewUi();
     refreshHostMenu();
+
+    // 监听起停与连接增减都会走到这里或 refreshClientList，两处都贴一次 ——
+    // 任缺一处就会出现「已经在被连、标题还写着等待连接」。
+    updateWindowChrome();
 }
 
 // ---------------------------------------------------------------------------

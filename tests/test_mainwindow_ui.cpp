@@ -31,6 +31,7 @@
 #include "app/MainWindow.h"
 #include "app/SessionStore.h"
 #include "app/Theme.h"
+#include "app/WindowStatus.h"
 #include "net/Auth.h"
 #include "net/ClientConnection.h"
 #include "net/HostServer.h"
@@ -88,6 +89,9 @@ private slots:
     // 多屏：单屏用户界面零变化；多屏时条上多一颗【屏幕】，菜单项与屏列表一致
     void screenButtonAppearsOnlyWithMultipleScreens();
     void screenMenuListsEveryMonitorAndMarksCurrent();
+
+    // 被控端的可见性：窗口标题要说出「此刻有没有人在看本机」，多路时只报数量
+    void windowTitleReportsWhetherSomebodyIsWatching();
 
     // 三个对话框
     void dialogsRoundTripTheirConfig();
@@ -1072,13 +1076,15 @@ void TestMainWindowUi::dialogsRoundTripTheirConfig()
 
     // 【设置…】
     lanrdp::SettingsDialog::Config sc;
-    sc.autoReconnect = false;
-    sc.inputEnabled  = true;
+    sc.autoReconnect  = false;
+    sc.inputEnabled   = true;
+    sc.singleInstance = true;
     lanrdp::SettingsDialog setDlg(sc);
 
     const auto sc2 = setDlg.config();
     QVERIFY2(!sc2.autoReconnect, "自动重连开关应当忠实反映入参");
     QVERIFY2(sc2.inputEnabled, "键鼠总开关应当忠实反映入参");
+    QVERIFY2(sc2.singleInstance, "单实例开关应当忠实反映入参");
 }
 
 // 【设置…】是两个「跨会话全局开关」的**唯一**编辑处，且刻意**不含**
@@ -1092,6 +1098,17 @@ void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
              "【设置…】应当有「断线自动重连」");
     QVERIFY2(dlg.findChild<QAbstractButton *>(QStringLiteral("inputCheck")),
              "【设置…】应当有「启用远程键鼠控制」");
+
+    // 托盘常驻：默认必须关。默认开会让「最小化 = 还在后台跑」在用户不知情时成立，
+    // 而这正是这个功能当初被否掉的理由。
+    auto *trayCheck = dlg.findChild<QAbstractButton *>(QStringLiteral("trayResidentCheck"));
+    QVERIFY2(trayCheck, "【设置…】应当有「最小化时收进通知区域」");
+    QVERIFY2(!trayCheck->isChecked(), "托盘常驻默认必须是关的");
+
+    // 单实例：同理默认关 —— 拦不拦双开是用户的选择，不该替他做。
+    auto *singleCheck = dlg.findChild<QAbstractButton *>(QStringLiteral("singleInstanceCheck"));
+    QVERIFY2(singleCheck, "【设置…】应当有「只允许运行一个程序窗口」");
+    QVERIFY2(!singleCheck->isChecked(), "单实例默认必须是关的");
 
     // 反证：启动参数不该出现在这里
     QVERIFY2(!dlg.findChild<QWidget *>(QStringLiteral("portEdit")),
@@ -3188,6 +3205,36 @@ void TestMainWindowUi::screenMenuListsEveryMonitorAndMarksCurrent()
     QCOMPARE(requested.last(), quint8(0));
 
     delete menu;
+}
+
+// 被控端最要紧的那一问：「现在有没有人在看我的屏幕」。
+// 机主常常把窗口最小化或压在别的窗口底下，那时能看见的只剩任务栏标题和按钮 ——
+// 所以这两个地方必须自己说出真相，而不是等机主想起来去翻窗口。
+void TestMainWindowUi::windowTitleReportsWhetherSomebodyIsWatching()
+{
+    MainWindow w(testLogPath());
+
+    // 什么都没做时不能出现「被控制」的字样
+    QCOMPARE(w.windowTitle(), lanrdp::baseWindowTitle());
+
+    quint16 port = 0;
+    QObject::connect(&w, &MainWindow::listening, &w, [&port](quint16 p) { port = p; });
+
+    w.startHost(0, QStringLiteral("secret"));
+    QTRY_VERIFY(port != 0);
+    QTRY_VERIFY2(w.windowTitle().contains(QStringLiteral("等待连接")),
+                 qPrintable(w.windowTitle()));
+
+    // 真的连一台进来，标题必须点名到对方地址
+    MainWindow client(testLogPath());
+    client.startConnect(QStringLiteral("127.0.0.1"), port, QStringLiteral("secret"));
+    QTRY_VERIFY(client.clientReady());
+
+    QTRY_VERIFY_WITH_TIMEOUT(w.windowTitle().contains(QStringLiteral("127.0.0.1")), 3000);
+
+    // 停止监听 ⇒ 立刻回到基准文案，不留「正在被控制」的残影
+    w.stopHost();
+    QTRY_COMPARE(w.windowTitle(), lanrdp::baseWindowTitle());
 }
 
 QTEST_MAIN(TestMainWindowUi)

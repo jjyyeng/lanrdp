@@ -38,8 +38,11 @@ class H264Decoder;
 class RemoteView;
 class ScreenOverlayBar;
 class ScreenStreamer;
+class SingleInstanceGuard;
 class ScreenRenderer;
 class Session;
+class TaskbarBadge;
+class TrayController;
 class ViewGrid;
 }
 
@@ -199,6 +202,19 @@ private slots:
     // 控制端自动重连开关（唯一编辑处是【设置…】）。
     void onAutoReconnectToggled(bool on);
 
+    // 通知区域常驻的开关。打开时把图标挂出来并把当前状态贴上去，关掉时收起。
+    // 没有通知区域的机器上这只是一次状态记录 —— 图标不会出现，最小化照常。
+    void applyTrayResident(bool on);
+
+    // 单实例的开关（唯一编辑处是【设置…】）。打开时开始监听：后来的实例
+    // 会被探测到并退出，同时把本窗口叫到前台；关掉时交出监听名。
+    // 监听建不起来只记一行日志，程序照常运行（fail-open）。
+    void applySingleInstance(bool on);
+
+    // 把主窗口带回前台并给焦点。托盘双击与单实例唤醒共用：藏在托盘里、
+    // 还在任务栏上、被别的窗口压住，都要能被这一下救回来。
+    void bringToFront();
+
 protected:
     // 窗口尺寸变化后重新下发「显示预算」给**每一格**的解码器。
     // ⚠️ 一控多下预算取的是**格子尺寸**（每格自己的 renderer），所以切布局 / 占满
@@ -208,6 +224,14 @@ protected:
 
     // 首次显示时中央区尺寸才落定，补一次显示预算下发（幂等）。
     void showEvent(QShowEvent *event) override;
+
+    // 最小化时收进通知区域（仅在【设置…】里勾了那一项时生效）。
+    // 走 changeEvent 而不是 closeEvent：最小化不改变「程序是否还在运行」，
+    // 窗口关闭的语义留到托盘常驻那一层再定。
+    void changeEvent(QEvent *event) override;
+
+    // 关闭窗口：正在待客/被看时收进通知区域，空闲时真的退出。
+    void closeEvent(QCloseEvent *event) override;
 
 public slots:
     // 清空运行日志。改为只清**内存缓冲**，不动落盘文件。
@@ -285,6 +309,10 @@ private:
 
     // UI 刷新：被控端「已连 N 个」按钮（含令牌持有标记）、控制端令牌状态。
     void refreshClientList();
+
+    // 把「本机此刻是否正在被看」贴到窗口标题与任务栏角标上。
+    // 幂等，监听起停与连接增减都归口到这里。
+    void updateWindowChrome();
     // 逐个视窗刷新操作权状态图标与【让出操作权】——每格看**自己那条连接**的
     // 令牌状态（一控多时各连各的令牌，不能看错格）。参数只为兼容既有的
     // `tokenStateChanged(bool)` 连接，实际不读。
@@ -387,6 +415,23 @@ private:
     // 宿主状态的**本地快照**，由 `uiStateChanged` 从工作线程推过来。
     // GUI 绝不直接去读工作线程的成员 —— 那是跨线程读。所有被控端 UI 都从这里取值。
     lanrdp::HostController::UiState hostState_;
+
+    // 任务栏按钮右下角的角标。窗口最小化、被别的窗口挡住时，任务栏按钮仍然在，
+    // 这是机主唯一还能看到「有人正在连」的地方。构造失败时静默无操作。
+    std::unique_ptr<lanrdp::TaskbarBadge> taskbarBadge_;
+    // 上一次贴出去的角标数值，用来判断「从没人看变成有人看」——只在那一下闪任务栏。
+    int lastBadgeCount_ = 0;
+
+    // 通知区域常驻图标。**永远存在**，但没打开开关时它连平台接口都不碰 ——
+    // 这样「默认关」在代码层面就是真的什么都不做，而不是建了再藏。
+    std::unique_ptr<lanrdp::TrayController> tray_;
+    bool trayResident_ = false;
+    // 收进托盘时的说明气泡只弹一次 —— 每次最小化都弹就是骚扰。
+    bool trayHintShown_ = false;
+
+    // 单实例协调器。开关首次打开时才创建（默认关 = 连对象都没有）。
+    std::unique_ptr<lanrdp::SingleInstanceGuard> singleGuard_;
+    bool singleInstance_ = false;
 
     lanrdp::ClipboardSync *clipboardSync_ = nullptr;  // 单实例剪贴板同步（绑 QClipboard）
 

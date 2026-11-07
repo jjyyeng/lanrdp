@@ -1,6 +1,7 @@
 #include "app/CliArgs.h"
 #include "app/MainWindow.h"
 #include "app/SessionStore.h"
+#include "app/SingleInstance.h"
 #include "app/Theme.h"
 
 #include "host/InputInjector.h"
@@ -119,13 +120,19 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // ---- 单实例保护：**刻意不做** ----
-    // 曾经用 `QLockFile` 拦过「双击两次开两扇窗」，已撤掉：锁文件建不出来时程序会
-    // **完全打不开**，而这功能只是省一次误操作 —— 代价明显大于收益。
-    // 另外 `--host` / `--connect` 这类脚本化模式，本来也不该被「同机自测」挡在门外。
-    // ⚠️ 以后若真要重做，底线是「建不出锁 ⇒ 照常启动」，绝不能反过来把启动拦掉。
+    // ---- 单实例唤醒判定 ----
+    // 要不要退出取决于**已有实例**开没开「单实例」，跟本进程自己的设置无关
+    // —— 互斥不需要被拦的一方同意，所以探测无条件做。连不上（没人监听、
+    // 权限被拒）一律照常启动 —— fail-open。
+    //
+    // CLI 脚本化模式（--host / --connect）豁免：同机双开做 A/B 自测是合法
+    // 用法，不能被拦。从前的 QLockFile 方案就是没留这个口子才被撤掉的。
+    if (!(hostMode || connectMode)
+        && lanrdp::SingleInstanceGuard::notifyRunning(lanrdp::singleInstanceKey())) {
+        return 0;  // 已有实例被叫到前台，本进程悄悄退出，不建窗口
+    }
 
-    // 界面外观要在建窗口**之前**装好：窗口一创建就会按当前 palette 定标题栏与
+    // ---- 界面外观要在建窗口**之前**装好：窗口一创建就会按当前 palette 定标题栏与
     // 子控件的底色，之后再换样式，用户会看见闪一下（而且标题栏不一定跟着变）。
     lanrdp::theme::apply(app);
 
@@ -136,7 +143,8 @@ int main(int argc, char *argv[])
     // 只有真正的程序运行才接上配置落盘：测试与自动化不传这一项，因此永远不碰
     // 开发机上那份 session.ini（详见 MainWindow 构造函数的说明）。
     MainWindow window(logFilePath, lanrdp::defaultSessionFilePath());
-    window.setWindowTitle(QStringLiteral("LAN RDP"));
+    // 标题不在这里设：窗口自己按「有没有人在看本机」维护它，
+    // 启动时已经是未监听的基准文案。
     window.resize(1100, 760);
 
     const bool autoMode = hostMode || connectMode;

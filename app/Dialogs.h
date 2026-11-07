@@ -116,8 +116,10 @@ class SettingsDialog : public QDialog
 
 public:
     struct Config {
-        bool autoReconnect = true;   // 断线自动重连
-        bool inputEnabled  = false;  // 启用远程键鼠控制
+        bool autoReconnect  = true;   // 断线自动重连
+        bool inputEnabled   = false;  // 启用远程键鼠控制
+        bool trayResident   = false;  // 最小化时收进通知区域
+        bool singleInstance = false;  // 只允许运行一个实例
     };
 
     explicit SettingsDialog(const Config &initial, QWidget *parent = nullptr);
@@ -125,8 +127,10 @@ public:
     Config config() const;
 
 private:
-    QCheckBox *autoReconnect_ = nullptr;
-    QCheckBox *input_         = nullptr;
+    QCheckBox *autoReconnect_  = nullptr;
+    QCheckBox *input_          = nullptr;
+    QCheckBox *tray_           = nullptr;
+    QCheckBox *singleInstance_ = nullptr;
 };
 
 } // namespace lanrdp
