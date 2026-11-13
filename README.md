@@ -1,3 +1,5 @@
+[English](README.en.md) | **简体中文**
+
 # lanrdp — Windows 局域网远程桌面
 
 DXGI 抓屏 + H.264 压缩 + 裸 TCP 传输的 Windows 远程桌面，Qt 6 / C++ / Win32 编写。
