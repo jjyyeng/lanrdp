@@ -1,7 +1,7 @@
 #include "app/PasswordEdit.h"
 
-#include "app/Glyph.h"
-#include "app/Theme.h"
+#include "ui/Glyph.h"
+#include "ui/Theme.h"
 
 #include <QResizeEvent>
 #include <QToolButton>
@@ -55,8 +55,8 @@ void PasswordEdit::syncToggle()
     toggle_->setIcon(glyph::icon(visible ? glyph::Shape::EyeOff : glyph::Shape::Eye,
                                  theme::colors().textSecondary));
 
-    const QString tip = visible ? QStringLiteral("隐藏当前输入的内容")
-                                : QStringLiteral("显示当前输入的内容");
+    const QString tip = visible ? tr("隐藏当前输入的内容")
+                                : tr("显示当前输入的内容");
     toggle_->setToolTip(tip);
     toggle_->setAccessibleName(tip);
 

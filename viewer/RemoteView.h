@@ -140,8 +140,16 @@ signals:
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
+    // 界面语言切换。条上按钮没有文字，文案全在悬停提示与无障碍名字里 ——
+    // 那两样都是"设过一次就一直留着"的，不重刷就会中英混着。
+    void changeEvent(QEvent *event) override;
+
 private:
     void buildUi();
+
+    // 按当前界面语言重设所有文案（提示 / 无障碍名字），并重刷依赖状态的图标文案。
+    // 构造末尾与语言切换各调一次 —— 文案只在它里面出现，避免两处各写一份。
+    void retranslate();
 
     // 按 maximized_ 刷那颗图标按钮（图形 + 悬停提示 + 无障碍名字）。
     // 创建时和状态切换时都走它 —— 两处的说明文字才不会各写一份、各自走样。

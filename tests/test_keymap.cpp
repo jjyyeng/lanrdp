@@ -19,6 +19,11 @@ private slots:
     void mapsFunctionKeys();
     void mapsPunctuationKeys();
     void mapsKeypadKeysDistinctlyFromMainKeyboard();
+    // 左右修饰键：必须靠 nativeScanCode 分（nativeVirtualKey 分不出来）
+    void mapsRightSideControlAndAlt();
+    void mapsRightSideWinAndShift();
+    void treatsAltGrAsRightAlt();
+    void withoutScanCodeFallsBackToLeft();
     void returnsZeroForUnsupportedKeys();
 };
 
@@ -131,6 +136,80 @@ void TestKeyMap::mapsKeypadKeysDistinctlyFromMainKeyboard()
     // 小键盘数字**不是**扩展键（标了的话被控端会收到方向键）
     QVERIFY(!qtKeyIsExtended(Qt::Key_5, keypad));
     QVERIFY(!qtKeyIsExtended(Qt::Key_5));
+}
+
+void TestKeyMap::mapsRightSideControlAndAlt()
+{
+    using lanrdp::mapKeyEvent;
+
+    // 左侧：扫描码无 0xE0 前缀
+    const lanrdp::KeyMapping lctrl = mapKeyEvent(Qt::Key_Control, Qt::NoModifier, 0x1D);
+    QCOMPARE(lctrl.vk, quint16(0x11));      // VK_CONTROL
+    QVERIFY(!lctrl.extended);
+
+    // 右侧：Qt 的 nativeScanCode() 会带 0xE0 前缀（实测 0xE01D）
+    const lanrdp::KeyMapping rctrl = mapKeyEvent(Qt::Key_Control, Qt::NoModifier, 0xE01D);
+    QCOMPARE(rctrl.vk, quint16(0x11));      // 仍是通用码，靠扩展位区分
+    QVERIFY(rctrl.extended);
+
+    const lanrdp::KeyMapping lalt = mapKeyEvent(Qt::Key_Alt, Qt::NoModifier, 0x38);
+    QCOMPARE(lalt.vk, quint16(0x12));
+    QVERIFY(!lalt.extended);
+
+    const lanrdp::KeyMapping ralt = mapKeyEvent(Qt::Key_Alt, Qt::NoModifier, 0xE038);
+    QCOMPARE(ralt.vk, quint16(0x12));
+    QVERIFY(ralt.extended);
+}
+
+void TestKeyMap::mapsRightSideWinAndShift()
+{
+    using lanrdp::mapKeyEvent;
+
+    // 「VK_LWIN + 扩展位」实测仍是左 Win ⇒ 右 Win 必须换码
+    const lanrdp::KeyMapping lwin = mapKeyEvent(Qt::Key_Meta, Qt::NoModifier, 0x5B);
+    QCOMPARE(lwin.vk, quint16(0x5B));
+    QVERIFY(!lwin.extended);
+
+    const lanrdp::KeyMapping rwin = mapKeyEvent(Qt::Key_Meta, Qt::NoModifier, 0xE05C);
+    QCOMPARE(rwin.vk, quint16(0x5C));       // VK_RWIN
+    QVERIFY(rwin.extended);
+
+    // 右 Shift 不是扩展键（扫描码 0x36、无 0xE0 前缀），加扩展位也没用，
+    // 只能换成 VK_RSHIFT
+    const lanrdp::KeyMapping lshift = mapKeyEvent(Qt::Key_Shift, Qt::NoModifier, 0x2A);
+    QCOMPARE(lshift.vk, quint16(0x10));     // VK_SHIFT
+    QVERIFY(!lshift.extended);
+
+    const lanrdp::KeyMapping rshift = mapKeyEvent(Qt::Key_Shift, Qt::NoModifier, 0x36);
+    QCOMPARE(rshift.vk, quint16(0xA1));     // VK_RSHIFT
+    QVERIFY(!rshift.extended);
+}
+
+void TestKeyMap::treatsAltGrAsRightAlt()
+{
+    // 部分键盘布局把右 Alt 报成 Qt::Key_AltGr。以前它映射不出来（返回 0）被直接丢弃，
+    // 现在按右 Alt 处理。
+    const lanrdp::KeyMapping map = lanrdp::mapKeyEvent(Qt::Key_AltGr, Qt::NoModifier, 0xE038);
+    QCOMPARE(map.vk, quint16(0x12));
+    QVERIFY(map.extended);
+}
+
+void TestKeyMap::withoutScanCodeFallsBackToLeft()
+{
+    // 手搓的 QKeyEvent 没有扫描码（测试、IME、自动化）。这时行为必须与修复前一致：
+    // 一律按左侧发，不能凭空冒出扩展位。
+    const lanrdp::KeyMapping ctrl = lanrdp::mapKeyEvent(Qt::Key_Control, Qt::NoModifier, 0);
+    QCOMPARE(ctrl.vk, quint16(0x11));
+    QVERIFY(!ctrl.extended);
+
+    // 非修饰键不受影响：走原来的表
+    const lanrdp::KeyMapping del = lanrdp::mapKeyEvent(Qt::Key_Delete, Qt::NoModifier, 0);
+    QCOMPARE(del.vk, quint16(0x2E));
+    QVERIFY(del.extended);
+
+    const lanrdp::KeyMapping letter = lanrdp::mapKeyEvent(Qt::Key_A, Qt::NoModifier, 0);
+    QCOMPARE(letter.vk, quint16(0x41));
+    QVERIFY(!letter.extended);
 }
 
 void TestKeyMap::returnsZeroForUnsupportedKeys()

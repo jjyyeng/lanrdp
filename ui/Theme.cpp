@@ -1,4 +1,4 @@
-#include "app/Theme.h"
+#include "ui/Theme.h"
 
 #include <QApplication>
 #include <QGuiApplication>
@@ -234,9 +234,10 @@ QLabel#passwordErrorHint { color: %7; }
 QLabel#connectErrorHint { color: %7; }
 QLabel#formHint { color: %1; }
 QLabel#firewallHint { color: %8; }
+QLabel#insecureHint { color: %9; }
 )").arg(c.textMuted.name(), c.surface.name(), c.border.name(),
        c.textPrimary.name(), c.surfaceActive.name(), c.accent.name(),
-       c.danger.name(), c.textSecondary.name());
+       c.danger.name(), c.textSecondary.name(), c.warning.name());
 
     // ⑥ 口令框右侧的「睁眼 / 划眼」开关。
     //    它不是主次操作（和【确定】不在一个量级），所以不留边框、不留底色，

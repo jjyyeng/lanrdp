@@ -8,7 +8,7 @@
 #include <memory>
 #include <thread>
 
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 #include "host/H264Encoder.h"
 #include "viewer/H264Decoder.h"
 

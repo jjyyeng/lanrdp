@@ -11,7 +11,7 @@ AuthBackoff::AuthBackoff(Config config)
 // 之所以不另起定时器 —— 一条 TCP 服务端上定时器越少越好，而访问该桶时顺手判一下
 // 的语义完全等价（下一次尝试时才需要正确的计数）。
 //
-// ⚠️ 有意**只清零、不 erase**（评审建议过删桶）：本类不做全表扫描，删单个桶只能删掉
+// ⚠️ 有意**只清零、不 erase**：本类不做全表扫描，删单个桶只能删掉
 // 「恰好又被访问到」的那个，删不到其余 —— 而条目数 = 历史不同源 IP 数，局域网内最多
 // 几百条 × 几十字节。真要回收得另加定期 sweep，收益不抵复杂度，故不做。
 void AuthBackoff::expireIfQuiet(const QString &sourceIp, qint64 nowMs)

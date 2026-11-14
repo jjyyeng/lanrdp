@@ -55,7 +55,7 @@
 #include <windows.h>
 #include <objbase.h> // CoInitializeEx（WIN32_LEAN_AND_MEAN 下 windows.h 不带它）
 
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 #include "host/H264Encoder.h"
 #include "viewer/H264Decoder.h"
 

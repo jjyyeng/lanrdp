@@ -24,6 +24,10 @@ private slots:
     void fallsBackOnInsaneValues();
     void disabledStoreTouchesNothing();
     void defaultPathIsUsable();
+    // 保存失败必须**给得出原因**：调用方要把它写进日志，否则用户只知道"没记住"
+    void failedSaveReportsReason();
+    // 用户主动清空口令 ⇒ 旧密文必须真的被清掉（不能因为"怕覆盖"就一直留着）
+    void clearingPasswordRemovesStoredCipher();
 };
 
 namespace {
@@ -197,6 +201,68 @@ void TestSessionStore::defaultPathIsUsable()
     QVERIFY2(path.contains(QStringLiteral("lanrdp")), qPrintable(path));
     // 必须是绝对路径：相对路径会跟着进程的工作目录跑（Explorer 启动时不保证是 exe 目录）。
     QVERIFY2(QFileInfo(path).isAbsolute(), qPrintable(path));
+}
+
+// 保存失败时必须给得出「为什么」，否则调用方只能记一句"没保存"，用户拿着日志也
+// 不知道该修什么（目录只读？磁盘满？口令加密失败？三种处理完全不同）。
+//
+// 用「停用」这条必定失败的路径来钉出参约定。⚠️ 真正危险的另一条 —— 口令加密失败
+// 却被 `QSettings::status()` 判成成功 —— 在正常环境里制造不出来（要 DPAPI 失败），
+// 只能靠实现里的分支保证：`writeSecret()` 加密失败时**不写那个键**并返回原因。
+void TestSessionStore::failedSaveReportsReason()
+{
+    lanrdp::SessionStore store;   // 空路径 = 停用
+
+    QString error;
+    QVERIFY2(!store.saveHost(sampleHost(), &error), "停用状态不该报告保存成功");
+    QVERIFY2(!error.isEmpty(), "失败必须填出原因（调用方要写进日志）");
+
+    lanrdp::PeerSession peer;
+    peer.host     = QStringLiteral("10.0.0.9");
+    peer.port     = 9100;
+    peer.password = QStringLiteral("secret7");
+    error.clear();
+    QVERIFY2(!store.savePeer(peer, &error), "停用状态不该报告保存成功");
+    QVERIFY2(!error.isEmpty(), "失败必须填出原因（调用方要写进日志）");
+
+    // 出参是可选的：不传也不能崩，返回值仍是同一个事实。
+    QVERIFY(!store.saveHost(sampleHost()));
+}
+
+// 用户主动清空口令 ⇒ 旧密文必须真的被清掉。
+//
+// 这条和「加密失败不许用空串覆盖旧密文」是一对：两者都发生在"新口令为空"附近，
+// 但语义相反。若为了保住旧密文而无条件跳过写入，用户清空口令后下次启动会看到
+// 它又回来了 —— 那是另一种"我说了不算"。
+void TestSessionStore::clearingPasswordRemovesStoredCipher()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = iniPath(dir);
+
+    lanrdp::SessionStore store(path);
+    lanrdp::HostSession host = sampleHost();
+    QString error;
+    QVERIFY2(store.saveHost(host, &error), qPrintable(error));
+    QVERIFY2(error.isEmpty(), "成功时不该留下失败原因");
+
+    {
+        QSettings ini(path, QSettings::IniFormat);
+        ini.sync();
+        QVERIFY2(!ini.value(QStringLiteral("host/password")).toString().isEmpty(),
+                 "口令非空时 ini 里应当有密文");
+    }
+
+    host.password.clear();
+    QVERIFY2(store.saveHost(host, &error), qPrintable(error));
+
+    QSettings after(path, QSettings::IniFormat);
+    after.sync();
+    QVERIFY2(after.value(QStringLiteral("host/password")).toString().isEmpty(),
+             "用户清空口令后，旧密文必须被清掉");
+    // 其余字段不受影响 —— 清口令不该顺手把端口/目录一起清掉。
+    QCOMPARE(store.loadHost().port, quint16(9111));
+    QCOMPARE(store.loadHost().receiveDir, QStringLiteral("D:/tmp/received"));
 }
 
 QTEST_GUILESS_MAIN(TestSessionStore)

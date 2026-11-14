@@ -30,6 +30,13 @@ public:
     // 恰好落在同一块地址（ABA），那时按指针回查会踢错人。
     quint64 id() const { return id_; }
 
+    // 从这条连接建立（对象构造）到现在过了多少毫秒。
+    //
+    // 用于「鉴权通过」那行日志的握手耗时 —— 这是用户唯一能感知的阶段
+    //（点【连接】到出现画面之间到底等了多久）。用单调时钟：系统时间被校准
+    // 也不会算出负数。
+    qint64 ageMs() const { return createdTimer_.elapsed(); }
+
     void sendFrame(const Frame &frame);
     void sendFrame(std::uint8_t type, const QByteArray &payload = QByteArray());
 
@@ -77,6 +84,9 @@ private:
     // 避免系统时间被校准 / 跨时区调整时把死链判定带偏。
     QElapsedTimer lastRxTimer_;
     bool          hasRx_ = false;
+
+    // 建立时刻（构造即启动）。与 lastRxTimer_ 一样用单调时钟。
+    QElapsedTimer createdTimer_;
 
     // 「载荷超过协议上限、已丢帧」只提示一次：超限是配置性问题（分辨率过高），
     // 每帧刷一行会把日志冲垮，反而盖掉真正有用的记录。

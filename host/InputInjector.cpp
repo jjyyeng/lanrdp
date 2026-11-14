@@ -1,5 +1,7 @@
 #include "host/InputInjector.h"
 
+#include <QVector>
+
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif
@@ -237,6 +239,57 @@ quint32 updatePressedMask(quint32 mask, const InputEvent &event)
     default:                    return mask;   // 未知键位：不动掩码，别凭空造出一个「按下」
     }
     return event.pressed ? (mask | bit) : (mask & ~bit);
+}
+
+QSet<std::uint32_t> updatePressedKeys(QSet<std::uint32_t> keys, const InputEvent &event)
+{
+    switch (event.kind) {
+    case InputKind::KeyDown:
+        keys.insert(pressedKeyTokenOf(event));
+        break;
+    case InputKind::KeyUp:
+        keys.remove(pressedKeyTokenOf(event));
+        break;
+    default:
+        break;   // 鼠标事件不动键盘集合
+    }
+    return keys;
+}
+
+QVector<KeyUpStroke> keyUpStrokes(const QSet<std::uint32_t> &keys)
+{
+    QVector<KeyUpStroke> strokes;
+    strokes.reserve(keys.size());
+    for (const std::uint32_t token : keys)
+        strokes.append(KeyUpStroke{pressedKeyVk(token), pressedKeyIsExtended(token)});
+    return strokes;
+}
+
+bool releaseKeys(const QSet<std::uint32_t> &keys)
+{
+    if (keys.isEmpty())
+        return true;
+
+    // 一次 SendInput 提交全部抬起：与鼠标那份「三针原子」同一理由 ——
+    // 要么全进、要么全被 UIPI 拦，不会出现「补了一半还报成功」。
+    //
+    // ⚠️ 扩展位**必须**与按下时一致：右 Ctrl / 右 Alt 与左侧共用同一个通用 VK，
+    // 光发 KEYEVENTF_KEYUP 会抬成左边那个 —— 右边那个永久卡在按下态（实测）。
+    const QVector<KeyUpStroke> strokes = keyUpStrokes(keys);
+
+    QVector<INPUT> inputs;
+    inputs.reserve(strokes.size());
+    for (const KeyUpStroke &stroke : strokes) {
+        INPUT input{};
+        input.type       = INPUT_KEYBOARD;
+        input.ki.wVk     = static_cast<WORD>(stroke.vk);
+        input.ki.dwFlags = KEYEVENTF_KEYUP
+                           | (stroke.extended ? KEYEVENTF_EXTENDEDKEY : 0);
+        inputs.append(input);
+    }
+
+    const UINT sent = ::SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+    return sent == static_cast<UINT>(inputs.size());
 }
 
 } // namespace lanrdp

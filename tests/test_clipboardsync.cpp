@@ -155,6 +155,12 @@ void TestClipboardSync::oversizedTextIsRejected()
 
     QCOMPARE(rejectSpy.count(), 1);
     QVERIFY(out.isEmpty());  // 超限不发帧
+
+    // 理由必须是给用户看的人话（它会原样进状态栏）：说清「上限」与「没同步」，
+    // 不写内部常量名。判据是这两层意思都在，而不是某个具体字节数。
+    const QString reason = rejectSpy.at(0).at(0).toString();
+    QVERIFY2(reason.contains(QStringLiteral("上限")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("未同步")), qPrintable(reason));
 }
 
 void TestClipboardSync::pausedWhenNoTarget()

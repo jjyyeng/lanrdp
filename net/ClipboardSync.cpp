@@ -122,7 +122,7 @@ void ClipboardSync::pushLocal()
 
     const auto payload = encodeClipboardText(text);
     if (!payload) {
-        emit rejected(QStringLiteral("剪贴板文本超过 %1 字节上限，未同步")
+        emit rejected(tr("剪贴板文本超过 %1 字节上限，未同步")
                           .arg(static_cast<qulonglong>(kClipboardMaxBytes)));
         return;
     }

@@ -1,6 +1,6 @@
 #include "viewer/AudioPlayer.h"
 
-#include "host/MfRuntime.h"   // 复用 hrText()
+#include "common/MfRuntime.h"   // 复用 hrText()
 
 #include <audioclient.h>
 #include <ksmedia.h>

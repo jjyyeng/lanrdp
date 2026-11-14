@@ -8,6 +8,7 @@
 #include <QImage>
 #include <QObject>
 #include <QRect>
+#include <QSet>
 #include <QSize>
 #include <QString>
 #include <QThread>
@@ -198,9 +199,11 @@ private:
     // 两条触发路径共用（低频定时器 / 有人来抢时的惰性判定）—— 措辞分叉过，
     // 其中一条曾经完全没通知被过期者，对方界面一直显示握着操作权。
     void announceIdleRelease(TokenGate::Token expired);
-    // 若我们注入过「按下」却还没注入过「抬起」，就补一针松开。
+    // 若我们注入过「按下」却还没注入过「抬起」，就替对端补一针抬起（鼠标 + 键盘）。
     // 调用时机：连接断开 / 收回令牌 / 停止监听 —— 那些「对端的抬起再也送不到」的时刻。
-    void releaseStuckMouseButtons(const QString &reason);
+    // ⚠️ 键盘与鼠标必须一起补：鼠标键卡住顶多拖拽不松手，修饰键卡住会让被控端
+    // 后续**所有**输入变形，而且键盘没有任何自动恢复的途径。
+    void releaseStuckInput(const QString &reason);
     // 当前状态的快照 + 推给 UI。任何会改变状态的路径收尾都要调一次 notifyUi()。
     UiState uiState() const;
     void    notifyUi();
@@ -247,8 +250,12 @@ private:
 
     // 逻辑按下的鼠标键掩码（位 0 左 / 位 1 右 / 位 2 中）。
     // 「逻辑」= 我们**注入过按下、还没注入过抬起**，与物理键无关。
-    // 只服务于 releaseStuckMouseButtons()：净身出户时若掩码非 0，就说明对端还欠我们一针抬起。
+    // 只服务于 releaseStuckInput()：净身出户时若掩码非 0，就说明对端还欠我们一针抬起。
     quint32 mouseButtonsDown_  = 0;
+    // 同上，记键盘。用集合而非位掩码：VK 取值范围太宽。
+    // ⚠️ 存的是复合键（vk + 扩展位）：左右 Ctrl / Alt / Win 共用同一个 VK，
+    // 只按 vk 记会让两个键互相销账，补抬起时还会把右键抬成左键。
+    QSet<std::uint32_t> keysDown_;
     quint64 injectedCount_     = 0;
     quint64 injectFailedCount_ = 0;
 };

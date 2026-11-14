@@ -5,6 +5,7 @@
 #include <QPixmap>
 #include <QString>
 
+class QAction;
 class QMenu;
 class QSystemTrayIcon;
 
@@ -57,6 +58,10 @@ public:
     // 短暂气泡提示。不可见时什么也不做。
     void notify(const QString &title, const QString &body);
 
+    // 按当前界面语言重设菜单项文字与悬停提示。语言切换时由 MainWindow 调用 ——
+    // 托盘菜单是 QMenu + QAction，收不到 QEvent::LanguageChange（它不是控件）。
+    void refreshTexts();
+
 signals:
     void restoreRequested();      // 双击图标，或菜单【显示主窗口】
     void stopSharingRequested();  // 菜单【停止共享】
@@ -73,6 +78,10 @@ private:
 
     QSystemTrayIcon *icon_ = nullptr;
     QMenu           *menu_ = nullptr;
+    // 菜单项留指针：菜单是建一次用到底的，语言切换要把文字重设一遍。
+    QAction         *restoreAction_   = nullptr;
+    QAction         *stopAction_      = nullptr;
+    QAction         *quitAction_      = nullptr;
     TrayStatus       status_    = TrayStatus::Listening;
     int              peerCount_ = 0;
     QString          peer_;

@@ -3,6 +3,7 @@
 #include "protocol/InputEvent.h"
 
 #include <QRect>
+#include <QSet>
 
 #include <cstdint>
 
@@ -81,6 +82,37 @@ bool releaseAllMouseButtons();
 // 依据一条**已成功注入**的输入事件更新「逻辑按下掩码」（位 0 左 / 位 1 右 / 位 2 中）。
 // 非鼠标按键事件原样返回。抽成纯函数是为了能单测边界，不必真的往系统灌针。
 quint32 updatePressedMask(quint32 mask, const InputEvent &event);
+
+// 同上，但记的是**键盘**：返回更新后的「逻辑按下的键集合」。
+//
+// 为什么键盘也要单独记：那一针「抬起」若没送到（按下与抬起之间断网 / 控制端被踢 /
+// 机主收回输入权 / 停止监听），被控端那个键会永久停在按下态 —— 而键盘比鼠标更难
+// 自己恢复（Shift 卡住则后续输入全变大写，Ctrl 卡住则点什么都是组合键）。
+// 键位远多于三个鼠标键，位掩码不够用，所以这里记的是集合而不是掩码。
+//
+// ⚠️ 集合里存的是 `protocol/InputEvent.h` 里的**复合键**（vk + 扩展位），不是裸 vk：
+// 左右 Ctrl / Alt / Win 共用同一个 VK，只按 vk 记会让两个键互相销账。
+QSet<std::uint32_t> updatePressedKeys(QSet<std::uint32_t> keys, const InputEvent &event);
+
+// 一针「抬起」要注入的键位。抽出来是为了能单测「扩展位有没有跟着走」——
+// 漏了它，右 Ctrl 会抬成左 Ctrl，被控端那个右键永久卡住（已实测）。
+struct KeyUpStroke
+{
+    std::uint16_t vk       = 0;
+    bool          extended = false;
+};
+
+// 把复合键集合摊成待注入的抬起针（不碰系统，纯函数）。
+QVector<KeyUpStroke> keyUpStrokes(const QSet<std::uint32_t> &keys);
+
+// 把给定的一批键**各补一针抬起**（一次 SendInput 批量提交，不动光标）。
+//
+// 与 `releaseAllMouseButtons()` 同一用途、同一前提：只在「确实注入过按下、
+// 却没注入过抬起」时才调用（判据是 `updatePressedKeys()` 维护的集合）。
+// ⚠️ 一次提交是原子的：要么全进、要么全被 UIPI 拦下，不会「补了一半还报成功」。
+// ⚠️ 空集合直接返回 true（不发针）—— 正常操作下不许碰系统。
+// ⚠️ 可从任意线程调用：SendInput 无线程亲和性。
+bool releaseKeys(const QSet<std::uint32_t> &keys);
 
 // 当前虚拟桌面像素矩形（多显示器时含负坐标）。取不到时退化为主显示器矩形。
 QRect virtualDesktopRect();

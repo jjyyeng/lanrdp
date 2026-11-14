@@ -7,8 +7,8 @@
 
 #include <cmath>
 
-#include "app/Glyph.h"
-#include "app/Theme.h"
+#include "ui/Glyph.h"
+#include "ui/Theme.h"
 
 // 界面外观的守护测试。
 //

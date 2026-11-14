@@ -1,7 +1,7 @@
 #include "app/TrayController.h"
 
-#include "app/Glyph.h"
-#include "app/Theme.h"
+#include "ui/Glyph.h"
+#include "ui/Theme.h"
 #include "app/WindowStatus.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -195,19 +195,21 @@ void TrayController::ensureIcon()
     menu_ = new QMenu();
     menu_->setObjectName(QStringLiteral("trayMenu"));
 
-    QAction *restore = menu_->addAction(QStringLiteral("显示主窗口"));
-    restore->setObjectName(QStringLiteral("trayRestore"));
-    connect(restore, &QAction::triggered, this, &TrayController::restoreRequested);
+    restoreAction_ = menu_->addAction(QString());
+    restoreAction_->setObjectName(QStringLiteral("trayRestore"));
+    connect(restoreAction_, &QAction::triggered, this, &TrayController::restoreRequested);
 
-    QAction *stop = menu_->addAction(QStringLiteral("停止共享"));
-    stop->setObjectName(QStringLiteral("trayStopSharing"));
-    connect(stop, &QAction::triggered, this, &TrayController::stopSharingRequested);
+    stopAction_ = menu_->addAction(QString());
+    stopAction_->setObjectName(QStringLiteral("trayStopSharing"));
+    connect(stopAction_, &QAction::triggered, this, &TrayController::stopSharingRequested);
 
     menu_->addSeparator();
 
-    QAction *quit = menu_->addAction(QStringLiteral("退出"));
-    quit->setObjectName(QStringLiteral("trayQuit"));
-    connect(quit, &QAction::triggered, this, &TrayController::quitRequested);
+    quitAction_ = menu_->addAction(QString());
+    quitAction_->setObjectName(QStringLiteral("trayQuit"));
+    connect(quitAction_, &QAction::triggered, this, &TrayController::quitRequested);
+
+    refreshTexts();
 
     icon_->setContextMenu(menu_);
 
@@ -218,6 +220,19 @@ void TrayController::ensureIcon()
                 if (reason == QSystemTrayIcon::DoubleClick || reason == QSystemTrayIcon::Trigger)
                     emit restoreRequested();
             });
+}
+
+void TrayController::refreshTexts()
+{
+    if (restoreAction_)
+        restoreAction_->setText(tr("显示主窗口"));
+    if (stopAction_)
+        stopAction_->setText(tr("停止共享"));
+    if (quitAction_)
+        quitAction_->setText(tr("退出"));
+
+    // 悬停提示复用窗口标题那套措辞（hostWindowTitle），换语言时也得跟着重算。
+    refreshIcon();
 }
 
 void TrayController::refreshIcon()

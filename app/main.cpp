@@ -2,7 +2,7 @@
 #include "app/MainWindow.h"
 #include "app/SessionStore.h"
 #include "app/SingleInstance.h"
-#include "app/Theme.h"
+#include "ui/Theme.h"
 
 #include "host/InputInjector.h"
 #include "protocol/InputEvent.h"

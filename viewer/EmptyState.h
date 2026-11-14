@@ -59,6 +59,13 @@ private:
     // 按**当前** DPR 重画大图标（构造时与 DPR 变化时各调一次）。
     void updateIcon();
 
+    // 文案的唯一来源：构造末尾与语言切换各走一次。
+    void retranslate();
+
+    // 「允许对方接入 / 禁止对方接入」那颗按钮的文案、图形与提示。
+    // 状态变化与语言切换都要刷它 —— 后者状态没变，走不了 setHostListening 的早退。
+    void applyHostButton();
+
     QLabel      *icon_           = nullptr;
     QLabel      *title_          = nullptr;
     QLabel      *subtitle_       = nullptr;

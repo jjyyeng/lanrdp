@@ -1,7 +1,8 @@
 #pragma once
 
 #include "app/Dialogs.h"
-#include "app/LogPort.h"
+#include "common/I18n.h"
+#include "common/LogPort.h"
 #include "app/SessionStore.h"
 // 值成员要用到 `HostController::UiState`（宿主状态的本地快照），所以这里必须见到完整定义。
 #include "host/HostController.h"
@@ -252,6 +253,18 @@ private:
     // 把【被控】菜单的两个双态项（监听开关、收回操作权）按当前状态刷新。
     void refreshHostMenu();
 
+    // ---- 界面语言 ----
+    // 菜单项的勾选态按「用户选择了哪种语言」刷（含「跟随系统」这一项）。
+    void refreshLanguageMenu();
+    // 用户点了某种语言：装翻译器 → 落盘 → 失败时说明原因。
+    void applyUiLanguage(lanrdp::UiLanguage lang);
+    // 界面语言变了：把那些「设过一次就不再改」的文案整批重设一遍。
+    //
+    // 为什么不能只靠 Qt 自动派发的 QEvent::LanguageChange：那个事件只到 QWidget。
+    // 菜单栏、QAction、托盘菜单、窗口标题、状态栏文本都不是靠 changeEvent 刷的，
+    // 得在这里显式重来一遍。
+    void retranslateUi();
+
     // 把一格条上的控件接到本窗口（每格只接一次）。
     void wireView(lanrdp::RemoteView *view);
     // 把该格那条连接的信号接到本窗口与该格（日志 / 状态栏 / 按钮 /
@@ -383,6 +396,10 @@ private:
     std::unique_ptr<lanrdp::LogPort> logPort_;
 
     QLabel       *statusLabel_  = nullptr;
+    // 状态栏「就绪」这个空闲态的**当前语言写法**。语言切换时拿它判断
+    // 「状态栏此刻是不是还停在空闲态」—— 是才重写，否则会把传输进度 /
+    // 连接结果这类正显示着的消息冲掉。
+    QString       idleStatusText_;
     // 两端各一条传输进度条。落在**状态栏**（放条上会让条宽
     // 随文件名不断跳动）；常态隐藏，传输时出现，结束复位。
     QProgressBar *sendProgress_ = nullptr;
@@ -491,4 +508,16 @@ private:
     // 由 refreshClientList 逐格刷）。
     QAction    *listenAction_    = nullptr;   // 开始监听… / 停止监听
     QAction    *takeInputAction_ = nullptr;   // 收回操作权 / 恢复操作
+
+    // ---- 菜单栏与「设好就不再改」的动作 ----
+    // 语言切换要把这些文字整批重设，所以不能是 buildViewMenu() 里的局部变量。
+    QMenu   *hostMenu_         = nullptr;
+    QMenu   *viewMenu_         = nullptr;
+    QMenu   *settingsMenu_     = nullptr;
+    QMenu   *languageMenu_     = nullptr;
+    QAction *toggleBarAction_    = nullptr;   // 【视图】悬浮操作条
+    QAction *openSettingsAction_ = nullptr;   // 【设置】设置…
+    QAction *langSystemAction_ = nullptr;     // 【设置 → 语言】跟随系统
+    QAction *langZhAction_     = nullptr;     // 中文
+    QAction *langEnAction_     = nullptr;     // English
 };

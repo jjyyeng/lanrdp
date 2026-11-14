@@ -1,6 +1,7 @@
 #include "viewer/ScreenRenderer.h"
 
-#include "app/Theme.h"
+#include "protocol/InputEvent.h"
+#include "ui/Theme.h"
 #include "viewer/KeyMap.h"
 
 #include <QDragEnterEvent>
@@ -137,10 +138,10 @@ void ScreenRenderer::releaseAllPressed()
     for (const int button : buttons)
         emit mouseButtonChanged(button, false, lastNx_, lastNy_);
 
-    const QSet<int> keys = pressedKeys_;
+    const QSet<std::uint32_t> keys = pressedKeys_;
     pressedKeys_.clear();
-    for (const int vk : keys)
-        emit keyChanged(vk, false, false);   // 补发抬起不区分扩展键：KEYEVENTF_KEYUP 已足够
+    for (const std::uint32_t token : keys)
+        emit keyChanged(static_cast<int>(pressedKeyVk(token)), false, pressedKeyIsExtended(token));
 }
 
 // 无画面时的提示文案（控制端「等待远程画面…」/ 被控端「预览已关闭」）。
@@ -267,6 +268,13 @@ void ScreenRenderer::dropEvent(QDropEvent *event)
     emit fileDropped(path);
 }
 
+void ScreenRenderer::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::LanguageChange)
+        update();
+    QWidget::changeEvent(event);
+}
+
 void ScreenRenderer::paintEvent(QPaintEvent *)
 {
     const lanrdp::theme::Colors &c = lanrdp::theme::colors();
@@ -303,7 +311,7 @@ void ScreenRenderer::paintEvent(QPaintEvent *)
                 painter.setPen(QColor(120, 220, 120));
                 painter.drawText(target.adjusted(6, 4, -6, 0),
                                  Qt::AlignTop | Qt::AlignLeft,
-                                 QStringLiteral("● 键鼠已接管，操作会发送到对方"));
+                                 tr("● 键鼠已接管，操作会发送到对方"));
             } else if (inputHintVisible()) {
                 // 反向提示：**有画面但键鼠没开**。这时输入会被静默丢弃，
                 // 用户只看得到「已获得输入权」却点什么都没反应 —— 必须说出来，
@@ -312,7 +320,7 @@ void ScreenRenderer::paintEvent(QPaintEvent *)
                 painter.fillRect(target, QColor(0, 0, 0, 90));
                 painter.setPen(QColor(240, 220, 150));
                 painter.drawText(target, Qt::AlignCenter,
-                                 QStringLiteral("点击画面，即可控制对方电脑"));
+                                 tr("点击画面，即可控制对方电脑"));
             }
         }
     }
@@ -411,24 +419,35 @@ bool ScreenRenderer::handleKeyEvent(QKeyEvent *event, bool pressed)
     // ⚠️ 抬起（pressed == false）**不受开关门控**：关掉开关后用户松手，
     // 这个抬起仍要发出去，否则远端那个键永久按下。
     // 判据用「这个键是不是我们记着按下的」—— 没记过的抬起没必要发（也免得凭空造事件）。
-    const int qtKey = event->key();
-    const std::uint16_t vk = qtKeyToVirtualKey(qtKey, event->modifiers());
+    //
+    // ⚠️ 记账单位是「复合键」（vk + 扩展位），不是裸 vk：左右 Ctrl 共用 0x11，
+    // 只按 vk 记的话，同时按住左右 Ctrl 再松开其中一个，另一个会被当成也松了。
+    const KeyMapping map = mapKeyEvent(event->key(), event->modifiers(), event->nativeScanCode());
+    const std::uint16_t vk    = map.vk;
+    const std::uint32_t token = pressedKeyToken(vk, map.extended);
 
     if (!pressed) {
-        if (vk != 0 && pressedKeys_.contains(static_cast<int>(vk))) {
-            pressedKeys_.remove(static_cast<int>(vk));
-            emit keyChanged(static_cast<int>(vk), false, qtKeyIsExtended(qtKey, event->modifiers()));
+        if (vk != 0 && pressedKeys_.contains(token)) {
+            pressedKeys_.remove(token);
+            emit keyChanged(static_cast<int>(vk), false, map.extended);
             return true;
         }
 
         // 按住期间 NumLock 被切：抬起映射成了另一个码（小键盘 ↔ 主键盘），
         // 按 vk 找不到那笔按下。这里反查一次，把账销在**按下时**那个 vk 上 ——
         // 否则抬起被吞，远端那个键永久按下。
+        // 按 vk 在集合里找（不比对扩展位），并用**记账时**那一位发抬起。
         const int alt = alternateVk(static_cast<int>(vk));
-        if (alt != 0 && pressedKeys_.contains(alt)) {
-            pressedKeys_.remove(alt);
-            emit keyChanged(alt, false, qtKeyIsExtended(qtKey, event->modifiers()));
-            return true;
+        if (alt != 0) {
+            // 遍历副本：下面会在循环里删元素
+            const QSet<std::uint32_t> recorded = pressedKeys_;
+            for (const std::uint32_t token0 : recorded) {
+                if (pressedKeyVk(token0) != static_cast<std::uint16_t>(alt))
+                    continue;
+                pressedKeys_.remove(token0);
+                emit keyChanged(alt, false, pressedKeyIsExtended(token0));
+                return true;
+            }
         }
 
         return inputEnabled_;   // 没记过的抬起：开关关着就当没看见
@@ -447,8 +466,8 @@ bool ScreenRenderer::handleKeyEvent(QKeyEvent *event, bool pressed)
     if (event->isAutoRepeat())
         return true;
 
-    pressedKeys_.insert(static_cast<int>(vk));
-    emit keyChanged(static_cast<int>(vk), true, qtKeyIsExtended(qtKey, event->modifiers()));
+    pressedKeys_.insert(token);
+    emit keyChanged(static_cast<int>(vk), true, map.extended);
     return true;
 }
 

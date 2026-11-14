@@ -26,6 +26,14 @@ private slots:
     void identifiesReleaseEvents();
     // 逻辑按下掩码：断开 / 收回令牌时「补发松开」的兜底要靠它判断有没有悬空的按下。
     void updatesPressedMaskFromButtonEvents();
+    // 逻辑按下的键集合：与鼠标掩码同一用途。⚠️ 键盘比鼠标更要紧 ——
+    // 卡住的修饰键会让被控端后续**所有**输入变形（全大写 / 点什么都带组合键）。
+    void updatesPressedKeysFromKeyEvents();
+    // 左右 Ctrl 共用 0x11：只按 vk 记账会让两颗键互相销账（松开一个、另一个被忽略）。
+    void tracksLeftAndRightModifiersSeparately();
+    // 补抬起必须带回按下时的扩展位，否则右 Ctrl 被抬成左 Ctrl、永久卡住。
+    void keyUpStrokesKeepExtendedBit();
+    void releaseKeysIsNoOpOnEmptySet();
 };
 
 namespace {
@@ -329,6 +337,127 @@ void TestInjector::updatesPressedMaskFromButtonEvents()
     m = updatePressedMask(m, rrelease);
     m = updatePressedMask(m, mrelease);
     QCOMPARE(m, quint32(0));
+}
+
+// 逻辑按下的键集合。三件事要钉住：按下入集、抬起出集、非键盘事件一律不动。
+// 它与鼠标掩码一起决定「断开时要不要替对端补一针抬起」——
+// 所以「没按下过的键」绝不能凭空出现在集合里（那会向系统灌一针无中生有的抬起）。
+void TestInjector::updatesPressedKeysFromKeyEvents()
+{
+    using lanrdp::InputEvent;
+    using lanrdp::InputKind;
+    using lanrdp::updatePressedKeys;
+
+    InputEvent shiftDown;
+    shiftDown.kind = InputKind::KeyDown;
+    shiftDown.vk   = 0x10;   // VK_SHIFT
+
+    QSet<quint32> keys = updatePressedKeys({}, shiftDown);
+    QVERIFY(keys.contains(quint32(0x10)));
+    QCOMPARE(keys.size(), 1);
+
+    // 长按会连发 KeyDown：必须幂等
+    keys = updatePressedKeys(keys, shiftDown);
+    QCOMPARE(keys.size(), 1);
+
+    InputEvent ctrlDown = shiftDown;
+    ctrlDown.vk         = 0x11;   // VK_CONTROL
+    keys                = updatePressedKeys(keys, ctrlDown);
+    QCOMPARE(keys.size(), 2);
+
+    // 只松开 Shift，Ctrl 仍在按下
+    InputEvent shiftUp = shiftDown;
+    shiftUp.kind       = InputKind::KeyUp;
+    keys               = updatePressedKeys(keys, shiftUp);
+    QCOMPARE(keys.size(), 1);
+    QVERIFY(keys.contains(quint32(0x11)));
+
+    // 鼠标三类事件都不该动键盘集合
+    InputEvent move;
+    move.kind = InputKind::MouseMove;
+    QCOMPARE(updatePressedKeys(keys, move).size(), 1);
+
+    InputEvent wheel;
+    wheel.kind = InputKind::MouseWheel;
+    QCOMPARE(updatePressedKeys(keys, wheel).size(), 1);
+
+    InputEvent button;
+    button.kind    = InputKind::MouseButton;
+    button.pressed = true;
+    QCOMPARE(updatePressedKeys(keys, button).size(), 1);
+
+    // 抬起一个从没按下过的键（对端重连后的残留抬起）：集合不该新增条目
+    InputEvent strayUp;
+    strayUp.kind = InputKind::KeyUp;
+    strayUp.vk   = 0x45;   // 'E'
+    QCOMPARE(updatePressedKeys(keys, strayUp).size(), 1);
+}
+
+void TestInjector::tracksLeftAndRightModifiersSeparately()
+{
+    using lanrdp::InputEvent;
+    using lanrdp::InputFlagExtended;
+    using lanrdp::InputKind;
+    using lanrdp::updatePressedKeys;
+
+    InputEvent leftCtrl;
+    leftCtrl.kind  = InputKind::KeyDown;
+    leftCtrl.vk    = 0x11;   // VK_CONTROL
+    leftCtrl.flags = lanrdp::InputFlagNone;
+
+    InputEvent rightCtrl = leftCtrl;
+    rightCtrl.flags      = InputFlagExtended;   // 右 Ctrl = 同一个 vk + 扩展位
+
+    QSet<quint32> keys = updatePressedKeys({}, leftCtrl);
+    keys               = updatePressedKeys(keys, rightCtrl);
+    QCOMPARE(keys.size(), 2);   // 两颗不同的键，不能合并成一条
+
+    // 松开左 Ctrl：右 Ctrl 必须仍在按下（只按 vk 记账时这条会失败）
+    InputEvent leftUp = leftCtrl;
+    leftUp.kind       = InputKind::KeyUp;
+    keys              = updatePressedKeys(keys, leftUp);
+    QCOMPARE(keys.size(), 1);
+    QVERIFY(keys.contains(lanrdp::pressedKeyToken(0x11, true)));
+
+    // 松开右 Ctrl 才清空
+    InputEvent rightUp = rightCtrl;
+    rightUp.kind       = InputKind::KeyUp;
+    keys               = updatePressedKeys(keys, rightUp);
+    QVERIFY(keys.isEmpty());
+}
+
+void TestInjector::keyUpStrokesKeepExtendedBit()
+{
+    // 这是「补发出厂设置」的那一针：扩展位漏了，右 Ctrl 会被抬成左 Ctrl，
+    // 被控端那个键永久停在按下态（实测 GetAsyncKeyState(VK_RCONTROL) 一直为按下）。
+    const QSet<quint32> keys = { lanrdp::pressedKeyToken(0x11, false),
+                                 lanrdp::pressedKeyToken(0x11, true),
+                                 lanrdp::pressedKeyToken(0xA1, false) };   // VK_RSHIFT
+
+    const QVector<lanrdp::KeyUpStroke> strokes = lanrdp::keyUpStrokes(keys);
+    QCOMPARE(strokes.size(), 3);
+
+    int plainCtrl = 0;
+    int extendedCtrl = 0;
+    int rightShift = 0;
+    for (const lanrdp::KeyUpStroke &stroke : strokes) {
+        if (stroke.vk == 0x11 && !stroke.extended)
+            ++plainCtrl;
+        else if (stroke.vk == 0x11 && stroke.extended)
+            ++extendedCtrl;
+        else if (stroke.vk == 0xA1 && !stroke.extended)
+            ++rightShift;
+    }
+    QCOMPARE(plainCtrl, 1);
+    QCOMPARE(extendedCtrl, 1);   // 左、右 Ctrl 各一针，且只有右边带扩展位
+    QCOMPARE(rightShift, 1);     // 右 Shift 走自己的 VK，不带扩展位
+}
+
+void TestInjector::releaseKeysIsNoOpOnEmptySet()
+{
+    // 空集合必须直接返回成功、不发针 —— 正常操作（没有卡键）时
+    // 这条兜底一次都不该碰系统。
+    QVERIFY(lanrdp::releaseKeys({}));
 }
 
 QTEST_GUILESS_MAIN(TestInjector)

@@ -15,10 +15,10 @@
 #include "app/MainWindow.h"
 
 #include "app/Dialogs.h"
-#include "app/Glyph.h"
+#include "ui/Glyph.h"
 #include "app/SingleInstance.h"
 #include "app/TaskbarBadge.h"
-#include "app/Theme.h"
+#include "ui/Theme.h"
 #include "app/TrayController.h"
 #include "app/WindowStatus.h"
 #include "host/HostController.h"
@@ -32,6 +32,7 @@
 #include "protocol/InputEvent.h"
 #include "viewer/AudioPlayer.h"
 #include "viewer/EmptyState.h"
+#include "viewer/ModifierKeyGuard.h"
 #include "viewer/RemoteView.h"
 #include "viewer/ScreenOverlayBar.h"
 #include "viewer/ScreenRenderer.h"
@@ -148,6 +149,11 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         : logFilePath;
     logPort_ = std::make_unique<lanrdp::LogPort>(logPath);
 
+    // 会话期间 Alt 归远端。装在这里而不是某个控件上：Qt 在 Alt **松开**时会激活
+    // 菜单栏并把焦点从画面控件抢走，那一下 KeyRelease 就送不到远端了 —— 远端 Alt
+    // 一直停在按下态，而且之后本机键盘全部进了菜单栏、不再发往远端。
+    qApp->installEventFilter(new lanrdp::ModifierKeyGuard(this));
+
     // 上次用过的会话参数（端口 / 口令 / 地址 / 接收目录 / 编码）。
     //
     // 口令在 ini 里是 DPAPI 密文，解不开（换了 Windows 用户或换了机器）就当作没存过，
@@ -169,6 +175,18 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         peerPort_     = peer.port;
         peerPassword_ = peer.password;
     }
+
+    // 界面语言必须在 buildUi() **之前**装好 —— 之后创建的每个控件都是按当时的
+    // 翻译表取文案的，晚一步就会留下一屏旧语言，得等用户再切一次才对得齐。
+    //
+    // 没存过（空串）时的兜底分两种：能持久化 ⇒ 跟随系统（首次运行就是这么定的）；
+    // **不能持久化**（测试 / 程序化嵌入）⇒ 沿用调用方当前的语言。后者不是特例照顾，
+    // 而是「没有配置可读时不该擅自改全局状态」—— 否则每造一个窗口都按开发机的
+    // 系统语言重装一遍，整批中文文案断言会在英文 Windows 上无声失效。
+    const lanrdp::UiLanguage fallback = sessionStore_.isEnabled()
+                                            ? lanrdp::UiLanguage::System
+                                            : lanrdp::currentUiLanguage();
+    lanrdp::setUiLanguage(lanrdp::uiLanguageFromKey(sessionStore_.loadUiLanguage(), fallback));
 
     // 控制端连接**不再在这里建** —— 它现在属于某一格（RemoteView）。
     // 第 0 格（本机预览格）在 buildUi() 里建好，且**没有连接**：只有真的要连一台
@@ -203,7 +221,7 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     audioPlayer_ = new lanrdp::AudioPlayer(this);
     connect(audioPlayer_, &lanrdp::AudioPlayer::failed, this, [this](const QString &reason) {
         log(QStringLiteral("听不到对方的声音（画面不受影响）：%1").arg(reason));
-        setStatusText(QStringLiteral("本机音频输出不可用，听不到对方的声音"));
+        setStatusText(tr("本机音频输出不可用，听不到对方的声音"));
     });
 
     // 音频体检：10 s 一次，**只在计数变化时写一行日志**。
@@ -254,8 +272,8 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     connect(host_, &lanrdp::HostController::fileStarted, this,
             [this](const QString &name, quint64 total) {
                 log(QStringLiteral("正在接收文件：%1（%2）").arg(name, humanBytes(total)));
-                setStatusText(QStringLiteral("接收中：%1").arg(name));
-                beginProgress(recvProgress_, QStringLiteral("接收中"), name, total);
+                setStatusText(tr("接收中：%1").arg(name));
+                beginProgress(recvProgress_, tr("接收中"), name, total);
             });
     // 进度按时间节流，避免大文件时刷屏。
     // 多个控制端同时传时，状态栏显示**最近有进展的那一路**（谁更新就显示谁）。
@@ -267,7 +285,7 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
                     return;
                 lastTick->restart();
                 stepProgress(recvProgress_, received, total);
-                setStatusText(QStringLiteral("接收中 %1 / %2 (%3%)")
+                setStatusText(tr("接收中 %1 / %2 (%3%)")
                                   .arg(humanBytes(received))
                                   .arg(humanBytes(total))
                                   .arg(int(received * 100 / total)));
@@ -277,10 +295,13 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
                 endProgress(recvProgress_);
                 if (ok) {
                     log(QStringLiteral("文件已接收并校验通过：%1").arg(path));
-                    setStatusText(QStringLiteral("文件接收完成"));
+                    // 带上文件名：只写「文件接收完成」时，用户还得去接收目录里
+                    // 按时间翻（自定义目录更容易迷路），而路径只出现在日志文件里。
+                    setStatusText(tr("文件接收完成：%1")
+                                      .arg(QFileInfo(path).fileName()));
                 } else {
                     log(QStringLiteral("文件接收失败：%1").arg(message));
-                    setStatusText(QStringLiteral("文件接收失败"));
+                    setStatusText(tr("文件接收失败"));
                 }
                 emit fileReceived(ok, path, message);
             });
@@ -311,7 +332,7 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     if (!logPort_->fileWritable()) {
         log(QStringLiteral("⚠️ 日志文件不可写，本次运行的日志**不会落盘**（仅内存）"));
         // 「日志写不进去」这件事不能只写进那份写不进去的日志 —— 必须走**看得见**的通道。
-        setStatusText(QStringLiteral("日志写不进文件（不影响使用）：%1")
+        setStatusText(tr("日志写不进文件（不影响使用）：%1")
                           .arg(logPort_->logFilePath()));
     }
 }
@@ -401,11 +422,12 @@ void MainWindow::buildUi()
             this, &MainWindow::onGridSelectionChanged);
 
     // 窗口级 QSS 已经不在这里了：条上按钮的「主操作加粗 / 危险操作标红」随
-    // 其余条内样式一起进了 app/Theme.cpp。分两处写必然有一处忘了跟着深色化 ——
+    // 其余条内样式一起进了 ui/Theme.cpp。分两处写必然有一处忘了跟着深色化 ——
     // 危险色从前是 #8a1f11，压在深色条上几乎看不见。
 
-    statusLabel_ = new QLabel(QStringLiteral("就绪"), this);
+    statusLabel_ = new QLabel(tr("就绪"), this);
     statusLabel_->setObjectName(QStringLiteral("statusLabel"));
+    idleStatusText_ = statusLabel_->text();
     statusBar()->addWidget(statusLabel_);
 
     // 两条传输进度条落在**状态栏**。
@@ -414,7 +436,7 @@ void MainWindow::buildUi()
     recvProgress_ = new QProgressBar(this);
     recvProgress_->setObjectName(QStringLiteral("recvProgress"));
     recvProgress_->setMaximumWidth(180);
-    recvProgress_->setToolTip(QStringLiteral(
+    recvProgress_->setToolTip(tr(
         "正在接收对方发送的文件。\n"
         "完成后将自动校验文件完整性。"));
     recvProgress_->setVisible(false);
@@ -423,7 +445,7 @@ void MainWindow::buildUi()
     sendProgress_ = new QProgressBar(this);
     sendProgress_->setObjectName(QStringLiteral("sendProgress"));
     sendProgress_->setMaximumWidth(180);
-    sendProgress_->setToolTip(QStringLiteral(
+    sendProgress_->setToolTip(tr(
         "正在向对方发送文件。\n"
         "也可以将文件拖入画面发送。"));
     sendProgress_->setVisible(false);
@@ -726,6 +748,7 @@ void MainWindow::reportAudioHealth()
     audioStarvedSeen_ = starved;
     audioDroppedSeen_ = dropped;
 
+    // 这四行只进日志、不进界面 —— 保持中文，不参与界面翻译。
     QString line = QStringLiteral("音频体检：设备队列 %1 ms").arg(audioPlayer_->queuedMs());
     if (starvedDelta > 0)
         line += QStringLiteral("，断流 %1 次（网络抖动或对端供不上）").arg(starvedDelta);
@@ -818,12 +841,12 @@ void MainWindow::syncMaximizeState()
 
 void MainWindow::buildHostMenu()
 {
-    QMenu *menu = menuBar()->addMenu(QStringLiteral("被控"));
+    hostMenu_ = menuBar()->addMenu(tr("被控"));
 
-    listenAction_ = menu->addAction(QStringLiteral("开始监听…"));
+    listenAction_ = hostMenu_->addAction(tr("开始监听…"));
     listenAction_->setObjectName(QStringLiteral("actionListen"));
     listenAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+1")));
-    listenAction_->setStatusTip(QStringLiteral("本机开始等待连接：先确认端口和口令，再开始监听"));
+    listenAction_->setStatusTip(tr("本机开始等待连接：先确认端口和口令，再开始监听"));
     connect(listenAction_, &QAction::triggered, this, [this] {
         if (isHosting())
             stopHost();
@@ -831,9 +854,9 @@ void MainWindow::buildHostMenu()
             openHostConfigDialog();
     });
 
-    takeInputAction_ = menu->addAction(QStringLiteral("收回操作权"));
+    takeInputAction_ = hostMenu_->addAction(tr("收回操作权"));
     takeInputAction_->setObjectName(QStringLiteral("actionTakeInput"));
-    takeInputAction_->setStatusTip(QStringLiteral(
+    takeInputAction_->setStatusTip(tr(
         "立刻收回对方对本机的键鼠控制并保持锁定；再点一次恢复。锁定不影响文件传输"));
     // 收回操作权**不设**「监听中才可用」的门：未监听时也能预防性锁定
     // —— 先把键鼠锁住，之后谁连上来都操作不了（stopHost 会清锁）。
@@ -852,14 +875,14 @@ void MainWindow::refreshHostMenu()
     const bool hosting = isHosting();
     const bool locked  = hostState_.inputLocked;
 
-    listenAction_->setText(hosting ? QStringLiteral("停止监听")
-                                   : QStringLiteral("开始监听…"));
+    listenAction_->setText(hosting ? tr("停止监听")
+                                   : tr("开始监听…"));
     listenAction_->setStatusTip(hosting
-        ? QStringLiteral("停止监听：断开所有已连接的控制端，本机不再接受新连接")
-        : QStringLiteral("本机开始等待连接：先确认端口和口令，再开始监听"));
+        ? tr("停止监听：断开所有已连接的控制端，本机不再接受新连接")
+        : tr("本机开始等待连接：先确认端口和口令，再开始监听"));
 
-    takeInputAction_->setText(locked ? QStringLiteral("恢复操作")
-                                     : QStringLiteral("收回操作权"));
+    takeInputAction_->setText(locked ? tr("恢复操作")
+                                     : tr("收回操作权"));
 }
 
 bool MainWindow::hostSessionActive() const
@@ -921,7 +944,7 @@ void MainWindow::refreshViewUi()
             if (live && multi) {
                 const lanrdp::ScreenList &list = conn->screenList();
                 v->screenButton()->setToolTip(
-                    QStringLiteral("选择要看的屏幕：共 %1 块，当前是第 %2 块")
+                    tr("选择要看的屏幕：共 %1 块，当前是第 %2 块")
                         .arg(list.screens.size())
                         .arg(int(list.current) + 1));
             }
@@ -937,15 +960,15 @@ void MainWindow::refreshViewUi()
         if (c && !c->host().isEmpty())
             t = QStringLiteral("%1:%2").arg(c->host()).arg(c->port());
         else if (views_.size() > 1)
-            t = QStringLiteral("第 %1 格（未连接）").arg(i + 1);
+            t = tr("第 %1 格（未连接）").arg(i + 1);
         else
-            t = QStringLiteral("未连接");
+            t = tr("未连接");
 
         // 断线格在标题上也要看得出来 —— 画面本身停了，只靠画面
         // 分不出「断了」与「远端没动」。退避与彻底断开措辞不同。
         if (stale)
-            t += c->reconnectPending() ? QStringLiteral("（正在重连…）")
-                                       : QStringLiteral("（已断开）");
+            t += c->reconnectPending() ? tr("（正在重连…）")
+                                       : tr("（已断开）");
         v->setTitle(t);
 
         // 空态层：只对「没有连接对象」的格出现 —— 那才是「接下来做什么」的问题所在。
@@ -959,7 +982,7 @@ void MainWindow::refreshViewUi()
         // 空格点下去更糟：会把整窗键鼠交给一个没有连接的渲染器（本机点击消失）。
         r->setInputHintEnabled(live);
         if (connectionOf(v)) {
-            r->setIdleText(QStringLiteral("等待远程画面…"));
+            r->setIdleText(tr("等待远程画面…"));
         } else {
             // 空格的引导由空态层自己排版，画面控件这里不再画文字 ——
             // 两处都画会在按钮后面透出一行重复的提示。
@@ -977,8 +1000,8 @@ void MainWindow::refreshViewUi()
         v->setDisconnected(
             stale,
             (vc && vc->reconnectPending())
-                ? QStringLiteral("连接已断开，正在自动重连…\n（条上可【重连】立刻再试，或【关闭】这一格）")
-                : QStringLiteral("已断开：画面停在最后一帧\n（条上可【重连】或【关闭】这一格）"));
+                ? tr("连接已断开，正在自动重连…\n（条上可【重连】立刻再试，或【关闭】这一格）")
+                : tr("已断开：画面停在最后一帧\n（条上可【重连】或【关闭】这一格）"));
         v->retryButton()->setVisible(stale);
         // 【关闭】的出口有两类：断线格（处置一条死连接）与空格（不想要这个窗口了）。
         // 唯一的空格不显示 —— 中央区总得留一格，关了它等于关掉软件的入口。
@@ -1011,17 +1034,17 @@ void MainWindow::refreshViewUi()
 // 标题栏 / 最大化按钮可能因此点不到；给一个 Ctrl+L 的收起入口，比让用户去拖窗口强。
 void MainWindow::buildViewMenu()
 {
-    QMenu *view = menuBar()->addMenu(QStringLiteral("视图"));
+    viewMenu_ = menuBar()->addMenu(tr("视图"));
 
-    QAction *toggle = view->addAction(QStringLiteral("悬浮操作条"));
-    toggle->setObjectName(QStringLiteral("actionToggleOverlayBar"));
-    toggle->setCheckable(true);
-    toggle->setChecked(true);
-    toggle->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
-    toggle->setStatusTip(QStringLiteral("显示 / 隐藏画面顶部的悬浮操作条（Ctrl+L）"));
+    toggleBarAction_ = viewMenu_->addAction(tr("悬浮操作条"));
+    toggleBarAction_->setObjectName(QStringLiteral("actionToggleOverlayBar"));
+    toggleBarAction_->setCheckable(true);
+    toggleBarAction_->setChecked(!barsHidden_);
+    toggleBarAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
+    toggleBarAction_->setStatusTip(tr("显示 / 隐藏画面顶部的悬浮操作条（Ctrl+L）"));
     // 逐格隐藏 —— 一控多时「收起条」是全局偏好，不该只收起选中那一格。
     // 用 m_barsHidden 记一份是必须的：新加的格要继承这个偏好（见 addView -> refreshViewUi）。
-    connect(toggle, &QAction::toggled, this, [this](bool on) {
+    connect(toggleBarAction_, &QAction::toggled, this, [this](bool on) {
         barsHidden_ = !on;
         for (lanrdp::RemoteView *v : std::as_const(views_)) {
             if (v && v->bar())
@@ -1029,27 +1052,164 @@ void MainWindow::buildViewMenu()
         }
     });
 
-    QMenu *settings = menuBar()->addMenu(QStringLiteral("设置"));
-    QAction *open = settings->addAction(QStringLiteral("设置…"));
-    open->setObjectName(QStringLiteral("actionOpenSettings"));
-    open->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
-    open->setStatusTip(QStringLiteral("断线自动重连 / 远程键鼠总开关"));
-    connect(open, &QAction::triggered, this, &MainWindow::openSettingsDialog);
+    settingsMenu_ = menuBar()->addMenu(tr("设置"));
+    openSettingsAction_ = settingsMenu_->addAction(tr("设置…"));
+    openSettingsAction_->setObjectName(QStringLiteral("actionOpenSettings"));
+    openSettingsAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
+    openSettingsAction_->setStatusTip(tr("断线自动重连 / 远程键鼠总开关"));
+    connect(openSettingsAction_, &QAction::triggered, this, &MainWindow::openSettingsDialog);
 
     // 音频：**全局偏好**，所以入口只能在这里（与另两项同规矩，悬浮条上不挂）。
     // 默认开 —— 默认关会造成「明明连着却听不见」的困惑，而听不听是随时可关的。
-    audioAction_ = settings->addAction(QStringLiteral("接收对方的声音"));
+    audioAction_ = settingsMenu_->addAction(tr("接收对方的声音"));
     audioAction_->setObjectName(QStringLiteral("actionReceiveAudio"));
     audioAction_->setCheckable(true);
     audioAction_->setChecked(audioEnabled_);
     audioAction_->setStatusTip(
-        QStringLiteral("听到对方电脑的系统声音（一控多时只播当前选中那一格）"));
+        tr("听到对方电脑的系统声音（一控多时只播当前选中那一格）"));
     connect(audioAction_, &QAction::toggled, this, [this](bool on) {
         audioEnabled_ = on;
         applyAudioRouting();
-        setStatusText(on ? QStringLiteral("已开启对方的声音")
-                         : QStringLiteral("已关闭对方的声音"));
+        setStatusText(on ? tr("已开启对方的声音")
+                         : tr("已关闭对方的声音"));
     });
+
+    settingsMenu_->addSeparator();
+
+    // ---- 界面语言 ----
+    // 两种语言各自用**自己的文字**写（中文 / English），不跟着界面语言翻 ——
+    // 界面上若是看不懂的语言，用户还得猜哪个是「切回中文」，那这个菜单就白给了。
+    // 只有「跟随系统」需要翻译。
+    languageMenu_ = settingsMenu_->addMenu(tr("语言"));
+    languageMenu_->setObjectName(QStringLiteral("menuLanguage"));
+
+    auto *langGroup = new QActionGroup(this);
+    langGroup->setExclusive(true);
+
+    auto addLangAction = [this, langGroup](const QString &text, lanrdp::UiLanguage lang,
+                                           const QString &objectName) {
+        QAction *action = languageMenu_->addAction(text);
+        action->setObjectName(objectName);
+        action->setCheckable(true);
+        action->setData(int(lang));
+        langGroup->addAction(action);
+        return action;
+    };
+
+    langSystemAction_ = addLangAction(tr("跟随系统"), lanrdp::UiLanguage::System,
+                                      QStringLiteral("actionLangSystem"));
+    langZhAction_     = addLangAction(QStringLiteral("中文"), lanrdp::UiLanguage::Chinese,
+                                      QStringLiteral("actionLangChinese"));
+    langEnAction_     = addLangAction(QStringLiteral("English"), lanrdp::UiLanguage::English,
+                                      QStringLiteral("actionLangEnglish"));
+
+    connect(langGroup, &QActionGroup::triggered, this, [this](QAction *action) {
+        applyUiLanguage(lanrdp::UiLanguage(action->data().toInt()));
+    });
+
+    refreshLanguageMenu();
+}
+
+// 勾选态反映「用户的选择」，不是「解析后的语言」——
+// 选了「跟随系统」就该一直勾在那一项上，哪怕系统此刻是中文。
+void MainWindow::refreshLanguageMenu()
+{
+    if (!languageMenu_)
+        return;
+
+    languageMenu_->setTitle(tr("语言"));
+
+    const lanrdp::UiLanguage choice = lanrdp::uiLanguageChoice();
+    if (langSystemAction_)
+        langSystemAction_->setChecked(choice == lanrdp::UiLanguage::System);
+    if (langZhAction_)
+        langZhAction_->setChecked(choice == lanrdp::UiLanguage::Chinese);
+    if (langEnAction_)
+        langEnAction_->setChecked(choice == lanrdp::UiLanguage::English);
+}
+
+// 换语言。
+//
+// ⚠️ setUiLanguage() 内部是**同步**派发 QEvent::LanguageChange 的：这一行返回时，
+// 本窗口的 retranslateUi() 与所有子控件的 changeEvent 都已经跑完了。所以顺序很要紧 ——
+// 先装语言，再落盘、再刷菜单勾选。
+void MainWindow::applyUiLanguage(lanrdp::UiLanguage lang)
+{
+    if (!lanrdp::setUiLanguage(lang)) {
+        // 只有一种失败：exe 里没嵌英文翻译（qm 缺失 / 损坏）。
+        // 界面已经退回中文，勾选态也随之回退 —— 这里只负责说一声。
+        refreshLanguageMenu();
+        setStatusText(tr("界面语言未能切换：程序内没有英文翻译资源"));
+        return;
+    }
+
+    refreshLanguageMenu();
+
+    // 落盘的是**用户的选择**（可能是「跟随系统」），不是解析结果。
+    if (sessionStore_.isEnabled())
+        sessionStore_.saveUiLanguage(lanrdp::uiLanguageKey(lang));
+}
+
+// 语言切换后的整批重设。
+//
+// Qt 会把 QEvent::LanguageChange 发给每个 QWidget，控件自己的 changeEvent 处理
+// 自己那份文案。但下面这些**都不是**靠 changeEvent 刷新的，必须在这里重来一遍：
+//   · 菜单栏与 QAction（不是 QWidget，收不到那个事件）
+//   · 状态栏 / 窗口标题 / 任务栏角标说明（都是 QString 内容，不是控件属性）
+//   · 托盘菜单（QMenu + QAction，同上）
+void MainWindow::retranslateUi()
+{
+    if (hostMenu_)
+        hostMenu_->setTitle(tr("被控"));
+    if (viewMenu_)
+        viewMenu_->setTitle(tr("视图"));
+    if (settingsMenu_)
+        settingsMenu_->setTitle(tr("设置"));
+
+    if (toggleBarAction_) {
+        toggleBarAction_->setText(tr("悬浮操作条"));
+        toggleBarAction_->setStatusTip(tr("显示 / 隐藏画面顶部的悬浮操作条（Ctrl+L）"));
+    }
+    if (openSettingsAction_) {
+        openSettingsAction_->setText(tr("设置…"));
+        openSettingsAction_->setStatusTip(tr("断线自动重连 / 远程键鼠总开关"));
+    }
+    if (audioAction_) {
+        audioAction_->setText(tr("接收对方的声音"));
+        audioAction_->setStatusTip(tr("听到对方电脑的系统声音（一控多时只播当前选中那一格）"));
+    }
+
+    // 两个双态项的措辞随状态走，交给它按当前状态重写（别在这里再抄一份）。
+    refreshHostMenu();
+    refreshLanguageMenu();
+
+    if (recvProgress_) {
+        recvProgress_->setToolTip(tr("正在接收对方发送的文件。\n"
+                                     "完成后将自动校验文件完整性。"));
+    }
+    if (sendProgress_) {
+        sendProgress_->setToolTip(tr("正在向对方发送文件。\n"
+                                     "也可以将文件拖入画面发送。"));
+    }
+
+    // 状态栏正文是动态的（传输进度 / 连接结果），只有「仍停在空闲态」时才换成新语言的写法 ——
+    // 否则会在用户正看着传输进度时把它冲掉。
+    const QString idle = tr("就绪");
+    if (statusLabel_ && statusLabel_->text() == idleStatusText_)
+        statusLabel_->setText(idle);
+    idleStatusText_ = idle;
+
+    // 每格：条标题、空态两个入口、等待画面 / 断线说明。
+    refreshViewUi();
+    // 「已连 N 个」的悬停提示（按当前客户端列表拼）。
+    updateHostTokenUi();
+    // 窗口标题 + 任务栏角标说明。
+    updateWindowChrome();
+    // 统计行（平时每秒自己刷，这里立刻来一次，免得等一秒）。
+    updateStats();
+
+    if (tray_)
+        tray_->refreshTexts();
 }
 
 // 窗口尺寸变了 -> 重新下发显示预算（解码输出尺寸上限框）。
@@ -1073,6 +1233,14 @@ void MainWindow::showEvent(QShowEvent *event)
 // 窗口会凭空消失而没有任何地方能把它叫回来 —— 那比占着任务栏糟糕得多。
 void MainWindow::changeEvent(QEvent *event)
 {
+    if (event->type() == QEvent::LanguageChange) {
+        // 界面语言变了：菜单 / 状态栏 / 标题这些「不是控件属性」的文案得手动重来。
+        // 子控件各自的 changeEvent 由 Qt 负责递归派发。
+        retranslateUi();
+        QMainWindow::changeEvent(event);
+        return;
+    }
+
     QMainWindow::changeEvent(event);
 
     if (event->type() != QEvent::WindowStateChange)
@@ -1089,8 +1257,8 @@ void MainWindow::changeEvent(QEvent *event)
     // 不说的话用户只看见窗口不见了。只提示一次，每次最小化都弹就是骚扰。
     if (!trayHintShown_ && tray_) {
         trayHintShown_ = true;
-        tray_->notify(QStringLiteral("仍在后台运行"),
-                      QStringLiteral("图标可能收在任务栏右下角的隐藏图标里，"
+        tray_->notify(tr("仍在后台运行"),
+                      tr("图标可能收在任务栏右下角的隐藏图标里，"
                                      "双击它即可恢复窗口。"));
     }
 }
@@ -1113,10 +1281,10 @@ void MainWindow::closeEvent(QCloseEvent *event)
     hide();
 
     if (tray_)
-        tray_->notify(QStringLiteral("仍在后台共享"),
+        tray_->notify(tr("仍在后台共享"),
                       hostState_.clients.isEmpty()
-                          ? QStringLiteral("还在等待同事连接。要彻底退出，请在托盘图标上选【退出】。")
-                          : QStringLiteral("同事仍能看到本机画面。要彻底停止，请在托盘图标上选"
+                          ? tr("还在等待同事连接。要彻底退出，请在托盘图标上选【退出】。")
+                          : tr("同事仍能看到本机画面。要彻底停止，请在托盘图标上选"
                                            "【停止共享】或【退出】。"));
 }
 
@@ -1388,7 +1556,7 @@ void MainWindow::wireConnection(lanrdp::RemoteView *view)
                     } else {
                         log(QStringLiteral("提示：【设置…】里勾选「启用远程键鼠控制」后即可操作远端"));
                     }
-                    setStatusText(QStringLiteral("已连接，等待画面…"));
+                    setStatusText(tr("已连接，等待画面…"));
                     updateConnectionUi();      // 连通后该格「断开」「发送文件」才可用
                     updateClipboardTarget();   // 控制端同步目标 = 这条会话
                     // 条标题要显示对端地址 —— 刷新交给 refreshViewUi()（它逐格读连接）。
@@ -1430,8 +1598,8 @@ void MainWindow::wireConnection(lanrdp::RemoteView *view)
     connect(c, &lanrdp::ClientConnection::fileStarted,
             this, [this](const QString &name, quint64 total) {
                 log(QStringLiteral("开始发送文件：%1（%2）").arg(name, humanBytes(total)));
-                setStatusText(QStringLiteral("发送中：%1").arg(name));
-                beginProgress(sendProgress_, QStringLiteral("发送中"), name, total);
+                setStatusText(tr("发送中：%1").arg(name));
+                beginProgress(sendProgress_, tr("发送中"), name, total);
             });
 
     auto lastTick = std::make_shared<QElapsedTimer>();
@@ -1443,7 +1611,7 @@ void MainWindow::wireConnection(lanrdp::RemoteView *view)
                     return;
                 lastTick->restart();
                 stepProgress(sendProgress_, sent, total);
-                setStatusText(QStringLiteral("发送中 %1 / %2 (%3%)")
+                setStatusText(tr("发送中 %1 / %2 (%3%)")
                                   .arg(humanBytes(sent))
                                   .arg(humanBytes(total))
                                   .arg(int(sent * 100 / total)));
@@ -1454,10 +1622,10 @@ void MainWindow::wireConnection(lanrdp::RemoteView *view)
                 endProgress(sendProgress_);
                 if (ok) {
                     log(QStringLiteral("文件已送达：%1").arg(QFileInfo(path).fileName()));
-                    setStatusText(QStringLiteral("文件发送完成"));
+                    setStatusText(tr("文件发送完成"));
                 } else {
                     log(QStringLiteral("文件发送失败：%1").arg(message));
-                    setStatusText(QStringLiteral("文件发送失败"));
+                    setStatusText(tr("文件发送失败"));
                 }
                 emit fileSent(ok, path, message);
             });
@@ -1510,7 +1678,7 @@ void MainWindow::openHostConfigDialog()
     // 真想改参数，先走【被控 → 停止监听】再开始。
     if (isHosting()) {
         log(QStringLiteral("本机已在监听，先停止监听才能修改端口或口令"));
-        setStatusText(QStringLiteral("本机已在监听（先停止监听才能修改参数）"));
+        setStatusText(tr("本机已在监听（先停止监听才能修改参数）"));
         return;
     }
 
@@ -1544,9 +1712,10 @@ void MainWindow::openHostConfigDialog()
         saved.receiveDir = hostRecvDir_;
         saved.useH264    = hostUseH264_;
         saved.bitrateBps = hostBitrate_;
-        if (!sessionStore_.saveHost(saved)) {
-            log(QStringLiteral("⚠ 无法保存会话参数（%1），下次启动需要重新填写。")
-                    .arg(sessionStore_.filePath()));
+        QString saveError;
+        if (!sessionStore_.saveHost(saved, &saveError)) {
+            log(QStringLiteral("⚠ 会话参数未能完整保存（%1）：%2。下次启动可能需要重新填写。")
+                    .arg(sessionStore_.filePath(), saveError));
         }
     }
 
@@ -1589,9 +1758,10 @@ void MainWindow::openConnectDialog()
         saved.host     = peerHost_;
         saved.port     = peerPort_;
         saved.password = peerPassword_;
-        if (!sessionStore_.savePeer(saved)) {
-            log(QStringLiteral("⚠ 无法保存会话参数（%1），下次启动需要重新填写。")
-                    .arg(sessionStore_.filePath()));
+        QString saveError;
+        if (!sessionStore_.savePeer(saved, &saveError)) {
+            log(QStringLiteral("⚠ 会话参数未能完整保存（%1）：%2。下次启动可能需要重新填写。")
+                    .arg(sessionStore_.filePath(), saveError));
         }
     }
 
@@ -1777,14 +1947,14 @@ void MainWindow::onClientListMenu(QToolButton *btn)
 
     QMenu menu(this);
     if (clients.isEmpty()) {
-        QAction *none = menu.addAction(QStringLiteral("暂无控制端连接"));
+        QAction *none = menu.addAction(tr("暂无控制端连接"));
         none->setEnabled(false);
     } else {
         for (const lanrdp::HostController::ClientInfo &info : clients) {
             QMenu *sub = menu.addMenu(info.isHolder
-                                          ? QStringLiteral("● %1（可操作本机）").arg(info.peer)
+                                          ? tr("● %1（可操作本机）").arg(info.peer)
                                           : QStringLiteral("○ %1").arg(info.peer));
-            QAction *kick = sub->addAction(QStringLiteral("踢出该控制端"));
+            QAction *kick = sub->addAction(tr("踢出该控制端"));
             // 快照里的 peer 一并捕获 —— 菜单弹出期间那条连接可能已经断了，
             // 到那时再去问会话就会踩到悬空指针。
             const quint64 target = info.sessionId;
@@ -1799,7 +1969,7 @@ void MainWindow::onClientListMenu(QToolButton *btn)
                 log(QStringLiteral("已请求踢出控制端：%1").arg(peer));
             });
             if (info.isHolder) {
-                QAction *take = sub->addAction(QStringLiteral("收回操作权"));
+                QAction *take = sub->addAction(tr("收回操作权"));
                 connect(take, &QAction::triggered, this, &MainWindow::takeInput);
             }
         }
@@ -1807,8 +1977,8 @@ void MainWindow::onClientListMenu(QToolButton *btn)
 
     menu.addSeparator();
     const bool locked = hostState_.inputLocked;
-    QAction *lock = menu.addAction(locked ? QStringLiteral("恢复操作")
-                                          : QStringLiteral("收回操作权并锁定"));
+    QAction *lock = menu.addAction(locked ? tr("恢复操作")
+                                          : tr("收回操作权并锁定"));
     connect(lock, &QAction::triggered, this, &MainWindow::onTakeInputButtonClicked);
 
     menu.exec(btn->mapToGlobal(QPoint(0, btn->height())));
@@ -1834,12 +2004,12 @@ QMenu *MainWindow::createScreenMenu(lanrdp::RemoteView *view)
     auto *menu = new QMenu(view->screenButton());
     for (int i = 0; i < list.screens.size(); ++i) {
         const lanrdp::ScreenInfo &screen = list.screens.at(i);
-        QString text = QStringLiteral("屏 %1 · %2×%3")
+        QString text = tr("屏 %1 · %2×%3")
                            .arg(i + 1)
                            .arg(screen.width)
                            .arg(screen.height);
         if (screen.primary)
-            text += QStringLiteral(" · 主屏");
+            text += tr(" · 主屏");
         QAction *action = menu->addAction(text);
         action->setCheckable(true);
         action->setChecked(i == int(list.current));
@@ -1956,18 +2126,18 @@ void MainWindow::refreshClientList()
 
     QString tip;
     if (count == 0) {
-        tip = QStringLiteral("暂无控制端连接");
+        tip = tr("暂无控制端连接");
     } else {
         // 明细走提示（悬停即可看），点开菜单才是操作 —— 避免为了看一眼谁在线就弹菜单。
         QStringList lines;
         for (const lanrdp::HostController::ClientInfo &info : clients) {
             lines << (info.isHolder
-                          ? QStringLiteral("● %1（当前可操作本机）").arg(info.peer)
+                          ? tr("● %1（当前可操作本机）").arg(info.peer)
                           : QStringLiteral("○ %1").arg(info.peer));
         }
         if (hostState_.inputLocked)
-            lines << QStringLiteral("（操作权已锁定：任何控制端都操作不了本机）");
-        tip = QStringLiteral("%1\n点击查看可用操作：断开指定控制端 / 收回操作权")
+            lines << tr("（操作权已锁定：任何控制端都操作不了本机）");
+        tip = tr("%1\n点击查看可用操作：断开指定控制端 / 收回操作权")
                   .arg(lines.join(QStringLiteral("\n")));
     }
 
@@ -1979,7 +2149,7 @@ void MainWindow::refreshClientList()
             continue;
         btn->setVisible(hostState_.listening);
         btn->setText(QString::number(count));
-        btn->setAccessibleName(QStringLiteral("已连 %1 个控制端").arg(count));
+        btn->setAccessibleName(tr("已连 %1 个控制端").arg(count));
         btn->setEnabled(count > 0);
         btn->setToolTip(tip);
     }
@@ -2010,8 +2180,8 @@ void MainWindow::updateWindowChrome()
     const int badge = lanrdp::hostBadgeCount(hostState_.listening, count);
     taskbarBadge_->setCount(badge,
                             count > 0
-                                ? QStringLiteral("正在被 %1 个连接查看本机").arg(count)
-                                : QStringLiteral("没有控制端连接"));
+                                ? tr("正在被 %1 个连接查看本机").arg(count)
+                                : tr("没有控制端连接"));
 
     // 只在「从没人看变成有人看」的那一下闪任务栏。每次刷新都闪就成了干扰，
     // 而状态快照本来就是每秒一帧。
@@ -2188,7 +2358,7 @@ void MainWindow::sendFileFrom(lanrdp::RemoteView *view)
         return;
     }
 
-    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择要发送的文件"));
+    const QString path = QFileDialog::getOpenFileName(this, tr("选择要发送的文件"));
     if (path.isEmpty())
         return;
 
@@ -2209,7 +2379,7 @@ void MainWindow::startHost(quint16 port, const QString &password)
     // 但命令行（--host）与程序化调用都直接走到这里。
     if (!lanrdp::isValidPassword(password)) {
         log(QStringLiteral("口令不合规（至少 6 位，且只能用英文字母、数字和符号），未开始监听"));
-        setStatusText(QStringLiteral("口令不合规，未开始监听"));
+        setStatusText(tr("口令不合规，未开始监听"));
         return;
     }
 
@@ -2221,7 +2391,7 @@ void MainWindow::startHost(quint16 port, const QString &password)
     // 起不来的原因（端口被占等）由 listenFailed 那一路记进日志。
     if (!hostStartSync(port, password)) {
         hostState_.listening = false;   // 同步落定：阻塞投递保证了「返回即已生效」
-        setStatusText(QStringLiteral("监听失败"));
+        setStatusText(tr("监听失败"));
         updateConnectionUi();
         return;
     }
@@ -2335,7 +2505,11 @@ void MainWindow::setupClipboard()
         log(QStringLiteral("已写入远端剪贴板文本（%1 字符）").arg(text.size()));
     });
     connect(clipboardSync_, &lanrdp::ClipboardSync::rejected, this, [this](const QString &reason) {
+        // ⚠️ 必须**同时**走状态栏：界面上没有日志视图，只写日志等于没提示 ——
+        // 用户会以为「剪贴板同步坏了」。与「日志写不进文件」是同一条原则：
+        // 只写进那份看不到的地方，等于没写。
         log(QStringLiteral("剪贴板未同步：%1").arg(reason));
+        setStatusText(tr("剪贴板未同步：%1").arg(reason));
     });
 }
 
@@ -2459,8 +2633,8 @@ void MainWindow::updateStats()
     // 永久缺掉这一栏（看起来像坏了）。帧尺寸由收到帧时统一记录。
     const QSize size = lastFrameSize_;
 
-    QString text = QStringLiteral("%1 | %2x%3 | %4 fps | %5 Mbps | 累计 %6 帧")
-                       .arg(hosting ? QStringLiteral("推送中") : QStringLiteral("接收中"))
+    QString text = tr("%1 | %2x%3 | %4 fps | %5 Mbps | 累计 %6 帧")
+                       .arg(hosting ? tr("推送中") : tr("接收中"))
                        .arg(size.width())
                        .arg(size.height())
                        .arg(deltaFrames)
@@ -2470,9 +2644,9 @@ void MainWindow::updateStats()
     const quint64 injected = hostState_.injectedCount;
     const quint64 failed   = hostState_.injectFailedCount;
     if (hosting && (injected > 0 || failed > 0)) {
-        text += QStringLiteral(" | 注入 %1 次").arg(injected);
+        text += tr(" | 注入 %1 次").arg(injected);
         if (failed > 0)
-            text += QStringLiteral("（失败 %1）").arg(failed);
+            text += tr("（失败 %1）").arg(failed);
     }
 
     setStatusText(text);

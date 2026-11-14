@@ -3,11 +3,16 @@
 #include <QFocusEvent>
 #include <QImage>
 #include <QKeyEvent>
+#include <QLineEdit>
+#include <QMainWindow>
+#include <QMenuBar>
 #include <QMouseEvent>
 #include <QSet>
 #include <QSignalSpy>
+#include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include "viewer/ModifierKeyGuard.h"
 #include "viewer/ScreenRenderer.h"
 
 // 控制端画面渲染控件
@@ -41,8 +46,16 @@ private slots:
     void releaseAfterNumLockToggleStillReleases();
     // 未映射键（vk == 0）：首次按下冒泡给上层，长按重复也必须冒泡 —— 否则同一次按键前后不一致
     void unmappedKeyAutoRepeatBubblesLikeFirstPress();
+    // 左右 Ctrl 共用 VK 0x11：靠扩展位分开记账，否则松开一个会把另一个也当成松开
+    void leftAndRightCtrlDoNotInterfere();
+    // 右侧修饰键必须带上扩展位发出去（否则被控端收到的是左边那个）
+    void rightSideModifiersCarryExtendedFlag();
     // 按键 / 滚轮载荷要带最后一次坐标
     void buttonAndWheelCarryLastPosition();
+    // Alt 必须交给远端，不能被本机菜单栏截走：截走则远端 Alt 卡住、本机键盘断流
+    void altIsRelayedToRemoteNotSwallowedLocally();
+    void altIsNotRelayedWhenFocusIsOutsideThePicture();
+    void focusComesBackAfterMenuBarStealsIt();
 };
 
 void TestRenderer::scaledRectFitsAndKeepsAspect()
@@ -366,6 +379,76 @@ void TestRenderer::losingFocusDoesNotReleasePressedKeys()
     QCOMPARE(keys.at(0).at(1).toBool(), false);
 }
 
+void TestRenderer::leftAndRightCtrlDoNotInterfere()
+{
+    lanrdp::ScreenRenderer renderer;
+    primeRenderer(renderer);
+
+    QSignalSpy keys(&renderer, &lanrdp::ScreenRenderer::keyChanged);
+
+    // 扫描码来自实测：左 Ctrl 0x1D、右 Ctrl 0xE01D（Qt 的 nativeScanCode() 带 0xE0 前缀）
+    const QKeyEvent lDown(QEvent::KeyPress, Qt::Key_Control, Qt::NoModifier, 0x1D, 0x11, 0);
+    const QKeyEvent rDown(QEvent::KeyPress, Qt::Key_Control, Qt::NoModifier, 0xE01D, 0x11, 0);
+    QCoreApplication::sendEvent(&renderer, const_cast<QKeyEvent *>(&lDown));
+    QCoreApplication::sendEvent(&renderer, const_cast<QKeyEvent *>(&rDown));
+    QCOMPARE(keys.count(), 2);
+
+    // 左 Ctrl 带扩展位 = 假，右 Ctrl = 真
+    QCOMPARE(keys.at(0).at(2).toBool(), false);
+    QCOMPARE(keys.at(1).at(2).toBool(), true);
+
+    keys.clear();
+
+    // 只松开左 Ctrl：右 Ctrl 必须仍在按下（只按 vk 记账时这条会失败）
+    const QKeyEvent lUp(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier, 0x1D, 0x11, 0);
+    QCoreApplication::sendEvent(&renderer, const_cast<QKeyEvent *>(&lUp));
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x11);
+    QCOMPARE(keys.at(0).at(1).toBool(), false);
+    QCOMPARE(keys.at(0).at(2).toBool(), false);   // 抬起的是左边那个
+
+    keys.clear();
+
+    // 补发抬起时，剩下的右 Ctrl 必须带扩展位再抬一次
+    renderer.releaseAllPressed();
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x11);
+    QCOMPARE(keys.at(0).at(2).toBool(), true);
+}
+
+void TestRenderer::rightSideModifiersCarryExtendedFlag()
+{
+    lanrdp::ScreenRenderer renderer;
+    primeRenderer(renderer);
+
+    QSignalSpy keys(&renderer, &lanrdp::ScreenRenderer::keyChanged);
+
+    // 右 Alt：通用码 0x12 + 扩展位
+    const QKeyEvent rAlt(QEvent::KeyPress, Qt::Key_Alt, Qt::NoModifier, 0xE038, 0x12, 0);
+    QCoreApplication::sendEvent(&renderer, const_cast<QKeyEvent *>(&rAlt));
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x12);
+    QCOMPARE(keys.at(0).at(2).toBool(), true);
+
+    keys.clear();
+
+    // 右 Win 换码（VK_RWIN 0x5C），不能靠「VK_LWIN + 扩展位」糊
+    const QKeyEvent rWin(QEvent::KeyPress, Qt::Key_Meta, Qt::NoModifier, 0xE05C, 0x5B, 0);
+    QCoreApplication::sendEvent(&renderer, const_cast<QKeyEvent *>(&rWin));
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x5C);
+    QCOMPARE(keys.at(0).at(2).toBool(), true);
+
+    keys.clear();
+
+    // 右 Shift 换码（VK_RSHIFT 0xA1），且不带扩展位
+    const QKeyEvent rShift(QEvent::KeyPress, Qt::Key_Shift, Qt::NoModifier, 0x36, 0x10, 0);
+    QCoreApplication::sendEvent(&renderer, const_cast<QKeyEvent *>(&rShift));
+    QCOMPARE(keys.count(), 1);
+    QCOMPARE(keys.at(0).at(0).toInt(), 0xA1);
+    QCOMPARE(keys.at(0).at(2).toBool(), false);
+}
+
 void TestRenderer::buttonAndWheelCarryLastPosition()
 {
     lanrdp::ScreenRenderer renderer;
@@ -464,6 +547,109 @@ void TestRenderer::pressOnHintRequestsEnableOnlyWhenHintShown()
     renderer.setInputHintEnabled(true);
     QCoreApplication::sendEvent(&renderer, &press);
     QCOMPARE(requests.count(), 1);
+}
+
+namespace {
+
+// 记录自己被按了几下：用来证明「焦点不在画面上时，Alt 没有被我们吞掉」
+class RecordingLineEdit : public QLineEdit
+{
+public:
+    int presses = 0;
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        ++presses;
+        QLineEdit::keyPressEvent(event);
+    }
+};
+
+// 造一个和真实主窗口同构的外壳：菜单栏 + 吃焦点的画面控件
+lanrdp::ScreenRenderer *showWindowWithPicture(QMainWindow *win)
+{
+    win->menuBar()->addMenu(QStringLiteral("文件"))->addAction(QStringLiteral("退出"));
+    auto *renderer = new lanrdp::ScreenRenderer;
+    win->setCentralWidget(renderer);
+    win->resize(640, 360);
+    renderer->setInputEnabled(true);
+    win->show();
+    if (!QTest::qWaitForWindowExposed(win))
+        return nullptr;
+    win->activateWindow();
+    renderer->setFocus(Qt::OtherFocusReason);
+    return renderer;
+}
+
+} // namespace
+
+// Alt 的抬起必须在**焦点已经被菜单栏抢走**之后仍然发到远端 —— 这正是原来丢键的时序：
+// 按下时画面还有焦点，松开时焦点已经跑到菜单栏，那一下 KeyRelease 就再也到不了远端，
+// 远端 Alt 永久停在按下态。
+void TestRenderer::altIsRelayedToRemoteNotSwallowedLocally()
+{
+    QMainWindow win;
+    lanrdp::ScreenRenderer *renderer = showWindowWithPicture(&win);
+    QVERIFY(renderer);
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(renderer));
+
+    auto *guard = new lanrdp::ModifierKeyGuard(&win);
+    qApp->installEventFilter(guard);
+
+    QSignalSpy keys(renderer, &lanrdp::ScreenRenderer::keyChanged);
+
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_Alt, Qt::NoModifier, 0x38, 0x12, 0);
+    QCoreApplication::sendEvent(renderer, &press);
+    QCOMPARE(keys.count(), 1);   // 只来一次：转发的那份才是唯一送达的
+    QCOMPARE(keys.at(0).at(0).toInt(), 0x12);
+    QCOMPARE(keys.at(0).at(1).toBool(), true);
+
+    // 复现「松开时焦点已在菜单栏」：抬起事件的目标不再是画面控件
+    win.menuBar()->setFocus(Qt::MenuBarFocusReason);
+    QKeyEvent release(QEvent::KeyRelease, Qt::Key_Alt, Qt::NoModifier, 0x38, 0x12, 0);
+    QCoreApplication::sendEvent(win.menuBar(), &release);
+
+    QCOMPARE(keys.count(), 2);
+    QCOMPARE(keys.at(1).at(0).toInt(), 0x12);
+    QCOMPARE(keys.at(1).at(1).toBool(), false);
+}
+
+// 焦点在对话框里时，Alt 仍归本机界面 —— 不能一概吞掉
+void TestRenderer::altIsNotRelayedWhenFocusIsOutsideThePicture()
+{
+    QWidget win;
+    auto *layout = new QVBoxLayout(&win);
+    auto *edit   = new RecordingLineEdit;
+    layout->addWidget(edit);
+    win.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&win));
+    win.activateWindow();
+    edit->setFocus(Qt::OtherFocusReason);
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(edit));
+
+    auto *guard = new lanrdp::ModifierKeyGuard(&win);
+    qApp->installEventFilter(guard);
+
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_Alt, Qt::NoModifier, 0x38, 0x12, 0);
+    QCoreApplication::sendEvent(edit, &press);
+    QCOMPARE(edit->presses, 1);
+}
+
+// 菜单栏已经把焦点抢走时，必须立刻还给画面控件：
+// 否则之后每一次按键都进菜单栏，远端一个键都收不到。
+void TestRenderer::focusComesBackAfterMenuBarStealsIt()
+{
+    QMainWindow win;
+    lanrdp::ScreenRenderer *renderer = showWindowWithPicture(&win);
+    QVERIFY(renderer);
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(renderer));
+
+    auto *guard = new lanrdp::ModifierKeyGuard(&win);
+    qApp->installEventFilter(guard);
+
+    win.menuBar()->setFocus(Qt::MenuBarFocusReason);
+    QCOMPARE(QApplication::focusWidget(), static_cast<QWidget *>(win.menuBar()));
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(renderer));
 }
 
 QTEST_MAIN(TestRenderer)

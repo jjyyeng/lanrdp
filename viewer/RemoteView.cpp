@@ -1,7 +1,7 @@
 #include "viewer/RemoteView.h"
 
-#include "app/Glyph.h"
-#include "app/Theme.h"
+#include "ui/Glyph.h"
+#include "ui/Theme.h"
 #include "net/ClientConnection.h"
 #include "viewer/EmptyState.h"
 #include "viewer/ScreenOverlayBar.h"
@@ -47,6 +47,7 @@ RemoteView::RemoteView(QWidget *parent)
     : QWidget(parent)
 {
     buildUi();
+    retranslate();
 }
 
 RemoteView::~RemoteView() = default;   // connection_ 在此销毁（头文件里只有前向声明）
@@ -101,8 +102,6 @@ void RemoteView::buildUi()
     clientListButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     clientListButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     clientListButton_->setIcon(glyph::icon(glyph::Shape::Person, theme::colors().textPrimary));
-    clientListButton_->setAccessibleName(QStringLiteral("已连 0 个控制端"));
-    clientListButton_->setToolTip(QStringLiteral("暂无控制端连接"));
     clientListButton_->setEnabled(false);
     clientListButton_->setVisible(false);   // 未监听时隐藏，由 MainWindow 按监听状态刷
     row->addWidget(clientListButton_);
@@ -127,9 +126,6 @@ void RemoteView::buildUi()
     releaseTokenButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     releaseTokenButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     releaseTokenButton_->setIcon(glyph::icon(glyph::Shape::Unlock, theme::colors().textPrimary));
-    releaseTokenButton_->setAccessibleName(QStringLiteral("让出操作权"));
-    releaseTokenButton_->setToolTip(QStringLiteral(
-        "让出当前操作权，允许其他控制端操作对方的电脑。"));
     releaseTokenButton_->setEnabled(false);   // 手上没有操作权时无从让出
     row->addWidget(releaseTokenButton_);
 
@@ -140,8 +136,6 @@ void RemoteView::buildUi()
     screenButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     screenButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     screenButton_->setIcon(glyph::icon(glyph::Shape::Monitor, theme::colors().textPrimary));
-    screenButton_->setAccessibleName(QStringLiteral("选择屏幕"));
-    screenButton_->setToolTip(QStringLiteral("选择要看的屏幕"));
     screenButton_->setVisible(false);
     row->addWidget(screenButton_);
 
@@ -149,10 +143,6 @@ void RemoteView::buildUi()
     sendFileButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     sendFileButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     sendFileButton_->setIcon(glyph::icon(glyph::Shape::SendFile, theme::colors().textPrimary));
-    sendFileButton_->setAccessibleName(QStringLiteral("发送文件"));
-    sendFileButton_->setToolTip(QStringLiteral(
-        "向对方发送文件，文件将保存到对方的接收目录，完成后自动校验完整性。\n"
-        "也可以将文件拖入画面发送。"));
     row->addWidget(sendFileButton_);
 
     disconnectButton_ = newBarButton(bar_, QString(), QStringLiteral("disconnectButton"));
@@ -160,9 +150,6 @@ void RemoteView::buildUi()
     disconnectButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     // 危险动作用告警色 —— 文字按钮时靠样式表的 color，换成图标后颜色得落在图形上。
     disconnectButton_->setIcon(glyph::icon(glyph::Shape::Disconnect, theme::colors().danger));
-    disconnectButton_->setAccessibleName(QStringLiteral("断开"));
-    disconnectButton_->setToolTip(QStringLiteral(
-        "断开此连接：画面停止刷新，当前操作权将自动释放。"));
     disconnectButton_->setEnabled(false);
     row->addWidget(disconnectButton_);
 
@@ -172,29 +159,18 @@ void RemoteView::buildUi()
     retryButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     retryButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     retryButton_->setIcon(glyph::icon(glyph::Shape::Reconnect, theme::colors().textPrimary));
-    retryButton_->setAccessibleName(QStringLiteral("重连"));
-    retryButton_->setToolTip(QStringLiteral(
-        "使用上次的地址与口令立即重新连接，不必等待自动重连。"));
     row->addWidget(retryButton_);
 
     closeCellButton_ = newBarButton(bar_, QString(), QStringLiteral("closeCellButton"));
     closeCellButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     closeCellButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     closeCellButton_->setIcon(glyph::icon(glyph::Shape::CloseCell, theme::colors().textPrimary));
-    closeCellButton_->setAccessibleName(QStringLiteral("关闭这一格"));
-    closeCellButton_->setToolTip(QStringLiteral(
-        "关闭此画面，其余画面不受影响。\n"
-        "仅剩一个画面时，将清空画面并回到初始状态。"));
     row->addWidget(closeCellButton_);
 
     connectButton_ = newBarButton(bar_, QString(), QStringLiteral("connectButton"));
     connectButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     connectButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
     connectButton_->setIcon(glyph::icon(glyph::Shape::NewConnection, theme::colors().textPrimary));
-    connectButton_->setAccessibleName(QStringLiteral("连接另一台"));
-    connectButton_->setToolTip(QStringLiteral(
-        "新增一个画面，并在其中选择连接远程电脑或允许远程电脑连接本机。\n"
-        "最多同时 4 个画面。"));
     row->addWidget(connectButton_);
 
     // ---- 「点这一格 = 选中这一格」----
@@ -203,6 +179,66 @@ void RemoteView::buildUi()
     // 那是好事 —— 按钮各自知道该作用于哪一格，本来就不需要先切选中。
     renderer_->installEventFilter(this);
     bar_->installEventFilter(this);
+}
+
+// 条上除「已连 N 个」外全是**纯图标**：说明只存在于悬停提示与无障碍名字里。
+// 所以「切换界面语言」在这一层等于「把那些提示重设一遍」—— 没有哪条可见文字
+// 会自己跟着变。
+void RemoteView::retranslate()
+{
+    if (clientListButton_) {
+        clientListButton_->setAccessibleName(tr("已连 0 个控制端"));
+        clientListButton_->setToolTip(tr("暂无控制端连接"));
+    }
+    if (releaseTokenButton_) {
+        releaseTokenButton_->setAccessibleName(tr("让出操作权"));
+        releaseTokenButton_->setToolTip(tr(
+            "让出当前操作权，允许其他控制端操作对方的电脑。"));
+    }
+    if (screenButton_) {
+        screenButton_->setAccessibleName(tr("选择屏幕"));
+        screenButton_->setToolTip(tr("选择要看的屏幕"));
+    }
+    if (sendFileButton_) {
+        sendFileButton_->setAccessibleName(tr("发送文件"));
+        sendFileButton_->setToolTip(tr(
+            "向对方发送文件，文件将保存到对方的接收目录，完成后自动校验完整性。\n"
+            "也可以将文件拖入画面发送。"));
+    }
+    if (disconnectButton_) {
+        disconnectButton_->setAccessibleName(tr("断开"));
+        disconnectButton_->setToolTip(tr(
+            "断开此连接：画面停止刷新，当前操作权将自动释放。"));
+    }
+    if (retryButton_) {
+        retryButton_->setAccessibleName(tr("重连"));
+        retryButton_->setToolTip(tr(
+            "使用上次的地址与口令立即重新连接，不必等待自动重连。"));
+    }
+    if (closeCellButton_) {
+        closeCellButton_->setAccessibleName(tr("关闭这一格"));
+        closeCellButton_->setToolTip(tr(
+            "关闭此画面，其余画面不受影响。\n"
+            "仅剩一个画面时，将清空画面并回到初始状态。"));
+    }
+    if (connectButton_) {
+        connectButton_->setAccessibleName(tr("连接另一台"));
+        connectButton_->setToolTip(tr(
+            "新增一个画面，并在其中选择连接远程电脑或允许远程电脑连接本机。\n"
+            "最多同时 4 个画面。"));
+    }
+
+    // 这两颗的文案随状态走（占满 ⇄ 还原、操作权三档），重算而不是重设 ——
+    // 各自只在 refresh*() 里写一份措辞。
+    refreshMaximizeButton();
+    refreshTokenStatus();
+}
+
+void RemoteView::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::LanguageChange)
+        retranslate();
+    QWidget::changeEvent(event);
 }
 
 void RemoteView::setConnection(std::unique_ptr<ClientConnection> conn)
@@ -244,10 +280,10 @@ void RemoteView::refreshMaximizeButton()
 
     maximizeButton_->setIcon(glyph::icon(
         on ? glyph::Shape::Restore : glyph::Shape::Maximize, theme::colors().textPrimary));
-    maximizeButton_->setAccessibleName(on ? QStringLiteral("还原") : QStringLiteral("占满"));
+    maximizeButton_->setAccessibleName(on ? tr("还原") : tr("占满"));
     maximizeButton_->setToolTip(on
-        ? QStringLiteral("退出占满，恢复多画面布局。\n（占满时按 Esc 等效）")
-        : QStringLiteral(
+        ? tr("退出占满，恢复多画面布局。\n（占满时按 Esc 等效）")
+        : tr(
               "将此画面铺满窗口区域；其余画面被隐藏但连接不断，\n"
               "还原后立即恢复显示。占满时按 Esc 也可还原。"));
 }
@@ -276,36 +312,36 @@ void RemoteView::refreshTokenStatus()
 
     switch (tokenState_) {
     case TokenState::Held:
-        what = QStringLiteral("已获得");
+        what = tr("已获得");
         break;
     case TokenState::Waiting:
         shape = glyph::Shape::PointerIdle;
         color = c.textSecondary;
-        what  = QStringLiteral("等待中");
+        what  = tr("等待中");
         break;
     case TokenState::NotConnected:
         shape = glyph::Shape::PointerIdle;
         color = c.textMuted;
-        what  = QStringLiteral("未连接");
+        what  = tr("未连接");
         break;
     }
 
     tokenStatusButton_->setIcon(glyph::icon(shape, color));
-    tokenStatusButton_->setAccessibleName(QStringLiteral("操作权：%1").arg(what));
+    tokenStatusButton_->setAccessibleName(tr("操作权：%1").arg(what));
 
     // 提示语要把「这意味着什么」和「拿不到时怎么办」都说清 —— 按钮上没有文字，
     // 也只显示一个图标，这里是唯一的解释处。
-    QString tip = QStringLiteral("操作权：%1\n").arg(what);
+    QString tip = tr("操作权：%1\n").arg(what);
     switch (tokenState_) {
     case TokenState::Held:
-        tip += QStringLiteral("当前已获得操作权，可控制对方电脑。");
+        tip += tr("当前已获得操作权，可控制对方电脑。");
         break;
     case TokenState::Waiting:
-        tip += QStringLiteral("操作权由对方掌握。点击画面可再次申请；\n"
+        tip += tr("操作权由对方掌握。点击画面可再次申请；\n"
                               "也可能是对方已锁定键鼠输入。");
         break;
     case TokenState::NotConnected:
-        tip += QStringLiteral("尚未建立连接，无法控制对方电脑。");
+        tip += tr("尚未建立连接，无法控制对方电脑。");
         break;
     }
     tokenStatusButton_->setToolTip(tip);

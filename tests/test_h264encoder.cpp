@@ -4,7 +4,7 @@
 #include <QFile>
 #include <QVector>
 
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 #include "host/H264Encoder.h"
 
 // Media Foundation H.264 编码器封装

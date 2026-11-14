@@ -105,4 +105,46 @@ bool qtKeyIsExtended(int qtKey, Qt::KeyboardModifiers mods)
     }
 }
 
+KeyMapping mapKeyEvent(int qtKey, Qt::KeyboardModifiers mods, quint32 nativeScanCode)
+{
+    // 右侧修饰键的扫描码带 0xE0 前缀（Qt 在 nativeScanCode() 里已经置好）。
+    // ⚠️ 不能用 nativeVirtualKey() 判左右：真键盘左右 Ctrl 都是 0x0011。
+    const bool rightSide = (nativeScanCode & 0xE000u) != 0u;
+
+    KeyMapping map;
+    switch (qtKey) {
+    case Qt::Key_Control:
+        // 裸发 0x11 会落到左 Ctrl；置扩展位才是右 Ctrl（实测 VK_RCONTROL 到位）
+        map.vk       = 0x11;
+        map.extended = rightSide;
+        return map;
+
+    case Qt::Key_Alt:
+    case Qt::Key_AltGr:   // 部分布局把右 Alt 报成 Key_AltGr：按右 Alt 走，别丢弃
+        map.vk       = 0x12;
+        map.extended = (qtKey == Qt::Key_AltGr) || rightSide;
+        return map;
+
+    case Qt::Key_Meta:
+        // 「VK_LWIN + 扩展位」实测仍是左 Win ⇒ 右 Win 只能换码
+        map.vk       = rightSide ? 0x5C : 0x5B;
+        map.extended = rightSide;
+        return map;
+
+    case Qt::Key_Shift:
+        // 右 Shift 不是扩展键（扫描码 0x36、无 0xE0 前缀），加扩展位也没用，
+        // 必须换成 VK_RSHIFT 才落得到右边。
+        map.vk       = (nativeScanCode == 0x36u) ? 0xA1 : 0x10;
+        map.extended = false;
+        return map;
+
+    default:
+        break;
+    }
+
+    map.vk       = qtKeyToVirtualKey(qtKey, mods);
+    map.extended = qtKeyIsExtended(qtKey, mods);
+    return map;
+}
+
 } // namespace lanrdp

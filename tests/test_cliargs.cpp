@@ -191,6 +191,21 @@ void TestCliArgs::rejectsHostWithBadPort()
                                              QStringLiteral("pw") });
     QVERIFY(!r.ok);
     QVERIFY2(r.error.contains(QStringLiteral("端口非法")), qPrintable(r.error));
+
+    // 端口 0 必须拒。`listen(0)` 的语义是「让系统分配一个随机空闲端口」，不是「没给」——
+    // 从前只判 `> 0xFFFF`，于是 `--host 0` 一路通过、真的去听了一个随机端口，
+    // 而日志与界面上照旧写着 9000，对端怎么连都超时（排障时极具误导性）。
+    const lanrdp::CliParseResult zero = parse({ QStringLiteral("--host"), QStringLiteral("0"),
+                                                QStringLiteral("pw") });
+    QVERIFY2(!zero.ok, "--host 0 应当被拒（否则会静默监听随机端口）");
+    QVERIFY2(zero.error.contains(QStringLiteral("端口非法")), qPrintable(zero.error));
+
+    // 连接侧同理：`:0` 不是「用默认端口」，是「连 0 号端口」。
+    const lanrdp::CliParseResult peerZero =
+        parse({ QStringLiteral("--connect"), QStringLiteral("1.2.3.4:0"),
+                QStringLiteral("pw") });
+    QVERIFY2(!peerZero.ok, "--connect host:0 应当被拒");
+    QVERIFY2(peerZero.error.contains(QStringLiteral("端口非法")), qPrintable(peerZero.error));
 }
 
 void TestCliArgs::rejectsConnectMissingPassword()

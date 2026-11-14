@@ -13,6 +13,8 @@ class QSpinBox;
 
 namespace lanrdp {
 
+class PasswordEdit;
+
 // 口令默认**留空**，由用户当场输入：一条公开写在源码里的出厂口令等于没设。
 // 长度与字符集的规则在 app/PasswordPolicy.h（唯一判定口）。
 //
@@ -67,7 +69,7 @@ public:
 
 private:
     QSpinBox  *port_          = nullptr;
-    QLineEdit *password_      = nullptr;
+    PasswordEdit *password_   = nullptr;
     QLabel    *passwordError_ = nullptr;
     QLineEdit *recvDir_       = nullptr;
     QCheckBox *h264_          = nullptr;
@@ -103,7 +105,7 @@ public:
 private:
     QLineEdit *host_     = nullptr;
     QSpinBox  *port_     = nullptr;
-    QLineEdit *password_ = nullptr;
+    PasswordEdit *password_   = nullptr;
     // 地址为空 / 口令不合规共用**同一条**红字：两类错误都是「这一栏没填对」，
     // 用两套提示（一个改 placeholder、一个常驻红字）会让人以为是两种不同的问题。
     QLabel    *error_    = nullptr;

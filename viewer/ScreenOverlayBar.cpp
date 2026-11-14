@@ -1,6 +1,6 @@
 #include "viewer/ScreenOverlayBar.h"
 
-#include "app/Theme.h"
+#include "ui/Theme.h"
 
 #include <QContextMenuEvent>
 #include <QEvent>
@@ -48,7 +48,7 @@ ScreenOverlayBar::ScreenOverlayBar(QWidget *parent)
     // 条内统一用 QToolButton 并单独收紧（工具按钮本来就该扁平紧凑）。
     // 注意：QToolButton 没设 icon 时会自动按「只显示文字」算尺寸，所以 setText 可见。
     //
-    // 配色不写在这里 —— 条内的样式与全局主题共用同一份色板，见 app/Theme.cpp。
+    // 配色不写在这里 —— 条内的样式与全局主题共用同一份色板，见 ui/Theme.cpp。
     // 条压在画面上，无论下面是白色网页还是深色壁纸都得站得住，所以它是深底浅字。
     setStyleSheet(lanrdp::theme::overlayBarStyleSheet());
 

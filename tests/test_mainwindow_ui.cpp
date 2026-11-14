@@ -30,7 +30,8 @@
 #include "app/Dialogs.h"
 #include "app/MainWindow.h"
 #include "app/SessionStore.h"
-#include "app/Theme.h"
+#include "common/I18n.h"
+#include "ui/Theme.h"
 #include "app/WindowStatus.h"
 #include "net/Auth.h"
 #include "net/ClientConnection.h"
@@ -67,6 +68,15 @@ class TestMainWindowUi : public QObject
     Q_OBJECT
 
 private slots:
+    // 每条用例开头把界面语言钉回中文。
+    //
+    // 这里的断言绝大多数是中文文案口径，而语言是**进程级全局状态**：某条用例
+    // 构造了「启用持久化」的窗口（如 restoresSavedSessionParameters），窗口会按
+    // ini / 系统语言重装一遍语言并留在那里，后面几十条用例就会集体变成英文界面、
+    // 集体失败 —— 失败信息看起来像文案改坏了，其实跟被测逻辑无关。
+    // 每条用例重置一次，也让开发机是英文 Windows 时结果保持一致。
+    void init();
+
     // 悬浮操作条
     void overlayBarGeometryIsPure();
     void overlayBarSitsOnTopOfScreen();
@@ -85,6 +95,8 @@ private slots:
     void statusBarIsIndependentOfOverlayBar();
     // 【设置】里的音频开关：可勾选、默认开、切换不崩（此刻没有任何连接 ⇒ 不该碰设备）
     void settingsMenuHasAudioSwitch();
+    // 语言切换必须当场把**已经在屏幕上**的界面换掉（用户不会为换语言重启）
+    void switchingLanguageRefreshesTheExistingWindow();
 
     // 多屏：单屏用户界面零变化；多屏时条上多一颗【屏幕】，菜单项与屏列表一致
     void screenButtonAppearsOnlyWithMultipleScreens();
@@ -97,11 +109,18 @@ private slots:
     void dialogsRoundTripTheirConfig();
     void dialogsAreDarkToo();
     void hostDialogExplainsFirewallPrompt();
+    // 明文链路要明说：不做 TLS 的取舍必须摊在用户眼前
+    void hostDialogSaysTrafficIsUnencrypted();
+    void connectDialogSaysTrafficIsUnencrypted();
     // 接收目录必须有默认值（空串不能原样显示成空框）
     void hostDialogPrefillsReceiveDir();
     // 口令框的「显示 / 隐藏」开关
     void passwordRevealToggleSwitchesEchoMode();
     void hostDialogRejectsWeakPassword();
+    // 口令栏的【生成】：一键产出合规随机串
+    void hostDialogCanGeneratePassword();
+    // 「连我」地址行（多网卡时选错地址是最典型的首连失败）
+    void hostDialogShowsLanAddressCard();
     void connectDialogRejectsWeakPassword();
     // 地址为空与口令不合规是同一类事：提示必须是同一个位置的同一条红字
     void connectDialogRejectsEmptyAddressWithTheSameRedLabel();
@@ -274,6 +293,11 @@ QByteArray readWholeFile(const QString &path)
 // ---------------------------------------------------------------------------
 // 悬浮操作条
 // ---------------------------------------------------------------------------
+
+void TestMainWindowUi::init()
+{
+    lanrdp::setUiLanguage(lanrdp::UiLanguage::Chinese);
+}
 
 // 纯函数：贴顶、满宽、高度固定。抽出来就是为了不起真窗口也能钉住这条约束。
 void TestMainWindowUi::overlayBarGeometryIsPure()
@@ -674,6 +698,62 @@ void TestMainWindowUi::settingsMenuHasAudioSwitch()
     QVERIFY(audio->isChecked());
 }
 
+// 语言切换必须当场把**已经在屏幕上**的界面换掉 —— 没人会为换语言去重启。
+//
+// 这条走的是真窗口，覆盖两条不同的刷新路径：
+//   · 菜单栏 / 状态栏 —— QAction 与 QString 不是控件属性，靠 MainWindow::retranslateUi 重设；
+//   · 空态标题与按钮 —— 归 EmptyState 自己的 changeEvent（子控件，靠 Qt 派发）。
+// 只测「启动时是英文」是不够的：那只证明构造顺序对，不证明切换能刷到已有控件。
+void TestMainWindowUi::switchingLanguageRefreshesTheExistingWindow()
+{
+    MainWindow w(testLogPath());
+    w.resize(1100, 760);
+    w.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&w));
+    QTest::qWait(50);
+
+    auto *view = w.viewAt(0);
+    QVERIFY(view);
+    auto *es = view->emptyState();
+    QVERIFY(es);
+
+    auto *title   = es->findChild<QLabel *>(QStringLiteral("emptyTitle"));
+    auto *primary = es->findChild<QPushButton *>(QStringLiteral("emptyPrimary"));
+    auto *status  = w.findChild<QLabel *>(QStringLiteral("statusLabel"));
+    QVERIFY2(title, "空态标题应当存在（objectName=emptyTitle）");
+    QVERIFY2(primary, "空态主按钮应当存在（objectName=emptyPrimary）");
+    QVERIFY2(status, "状态栏标签应当存在（objectName=statusLabel）");
+
+    // 起点显式定成中文，**不能靠启动默认值**：窗口构造时会按 ini 的 ui/language
+    // 装语言，没存过则跟随系统 —— 这台机器是英文 Windows，留给后面的断言就会漂。
+    // 反过来，这一步本身也是「切到中文」的验证。
+    QVERIFY(lanrdp::setUiLanguage(lanrdp::UiLanguage::Chinese));
+    QCoreApplication::processEvents();
+    QCOMPARE(title->text(), QStringLiteral("尚未连接"));
+    QCOMPARE(status->text(), QStringLiteral("就绪"));
+
+    // ---- 切到英文 ----
+    QVERIFY(lanrdp::setUiLanguage(lanrdp::UiLanguage::English));
+    QCoreApplication::processEvents();
+
+    QStringList menuTitles;
+    for (QAction *action : w.menuBar()->actions())
+        menuTitles << action->text();
+    QVERIFY2(menuTitles.contains(QStringLiteral("Hosting")),
+             qPrintable(QStringLiteral("菜单没跟着换语言：") + menuTitles.join(QLatin1Char('|'))));
+
+    QCOMPARE(title->text(), QStringLiteral("Not connected"));
+    QCOMPARE(primary->text(), QStringLiteral("Connect to a remote computer"));
+    QCOMPARE(status->text(), QStringLiteral("Ready"));
+
+    // ---- 切回中文：同一批控件要能来回，不能只单程生效 ----
+    QVERIFY(lanrdp::setUiLanguage(lanrdp::UiLanguage::Chinese));
+    QCoreApplication::processEvents();
+    QCOMPARE(title->text(), QStringLiteral("尚未连接"));
+    QCOMPARE(primary->text(), QStringLiteral("连接远程电脑"));
+    QCOMPARE(status->text(), QStringLiteral("就绪"));
+}
+
 void TestMainWindowUi::viewMenuTogglesOverlayBar()
 {
     MainWindow w(testLogPath());
@@ -842,6 +922,76 @@ void TestMainWindowUi::hostDialogExplainsFirewallPrompt()
              qPrintable(QStringLiteral("提示没说要放行：") + hint));
     QVERIFY2(!hint.contains(QStringLiteral("专用网络")),
              qPrintable(QStringLiteral("又去指网络类型了（网卡归属不定，指哪边都可能错）：") + hint));
+}
+
+// 明文链路必须明说。TLS 已定为不做，这个取舍就得摊在用户眼前 —— 尤其要挡住
+// 「把监听端口映射到公网」这种误用（那是本项目最坏的一种用法）。
+//
+// 两个入口各一条：用户是在弹窗里做决定的，提示就该在弹窗里，而不是只在别处交代一句。
+void TestMainWindowUi::hostDialogSaysTrafficIsUnencrypted()
+{
+    lanrdp::HostConfigDialog host(lanrdp::HostConfigDialog::Config{}, nullptr);
+    auto *hint = host.findChild<QLabel *>(QStringLiteral("insecureHint"));
+    QVERIFY2(hint, "开始监听对话框里应有「流量未加密」提示");
+    QVERIFY2(hint->text().contains(QStringLiteral("未加密")), qPrintable(hint->text()));
+    QVERIFY2(hint->text().contains(QStringLiteral("局域网")), qPrintable(hint->text()));
+    QVERIFY2(hint->text().contains(QStringLiteral("公网")), qPrintable(hint->text()));
+
+    // 颜色由主题 QSS 的 #insecureHint 规则决定。少了那条规则，上面几条照样全绿，
+    // 而这一行会静默退回正文色 —— 警告读起来像说明。
+    host.setStyleSheet(lanrdp::theme::applicationStyleSheet());
+    hint->ensurePolished();
+    QCOMPARE(hint->palette().color(QPalette::WindowText), lanrdp::theme::colors().warning);
+}
+
+void TestMainWindowUi::connectDialogSaysTrafficIsUnencrypted()
+{
+    lanrdp::ConnectDialog dlg(lanrdp::ConnectDialog::Config{}, nullptr);
+    auto *hint = dlg.findChild<QLabel *>(QStringLiteral("insecureHint"));
+    QVERIFY2(hint, "连接对话框里应有「流量未加密」提示");
+    QVERIFY2(hint->text().contains(QStringLiteral("未加密")), qPrintable(hint->text()));
+    QVERIFY2(hint->text().contains(QStringLiteral("公网")), qPrintable(hint->text()));
+
+    dlg.setStyleSheet(lanrdp::theme::applicationStyleSheet());
+    hint->ensurePolished();
+    QCOMPARE(hint->palette().color(QPalette::WindowText), lanrdp::theme::colors().warning);
+}
+
+// 口令栏的【生成】：一键产出合规随机串，并切到可见 —— 生成这个动作本身就意味着
+// 「我要把它念给旁边的人」，藏着反而容易抄错。
+void TestMainWindowUi::hostDialogCanGeneratePassword()
+{
+    lanrdp::HostConfigDialog host(lanrdp::HostConfigDialog::Config{}, nullptr);
+    auto *edit     = host.findChild<QLineEdit *>(QStringLiteral("passwordEdit"));
+    auto *generate = host.findChild<QPushButton *>(QStringLiteral("generatePasswordButton"));
+    QVERIFY2(edit && generate, "口令框与【生成】按钮都应存在");
+
+    // 出厂口令必须是空的：本项目不存在「拿到就能用」的默认凭据。
+    QVERIFY2(edit->text().isEmpty(), "口令框默认应当是空的");
+    QVERIFY2(edit->echoMode() != QLineEdit::Normal, "默认应当是隐藏态");
+
+    generate->click();
+    QVERIFY2(lanrdp::isValidPassword(edit->text()),
+             qPrintable(QStringLiteral("生成的口令不合规：") + edit->text()));
+    QVERIFY2(edit->echoMode() == QLineEdit::Normal, "生成后应当切到可见，方便念给对方");
+
+    // 生效到 Config 上：对话框里看到的和真正拿去监听的必须是同一个串。
+    QCOMPARE(host.config().password, edit->text());
+}
+
+// 「连我」地址行：对方要填的地址直接摆出来，省掉「先去查本机 IP」。
+//
+// 文案正确性（过滤虚拟网卡、多地址拼接、空列表兜底）由 test_lanaddresses 钉住；
+// 这里只确认这两件东西真的挂进了对话框 —— 那才是「用户看不看得见」的部分。
+void TestMainWindowUi::hostDialogShowsLanAddressCard()
+{
+    lanrdp::HostConfigDialog host(lanrdp::HostConfigDialog::Config{}, nullptr);
+    auto *label = host.findChild<QLabel *>(QStringLiteral("lanAddressLabel"));
+    auto *copy  = host.findChild<QPushButton *>(QStringLiteral("copyLanAddressButton"));
+    QVERIFY2(label && copy, "地址行与【复制】按钮都应存在");
+
+    // 要么列地址，要么给一句「没找到」；空行会让人以为界面坏了。
+    QVERIFY2(!label->text().isEmpty(), "地址行不能是空白");
 }
 
 // 接收目录不能显示成空框：真正落盘时会退到系统「下载」目录（MainWindow::receiveDir()），
@@ -1695,6 +1845,13 @@ void TestMainWindowUi::sendFileCliShutdownDeliversLargeFile()
     QVERIFY2(receivedOk.at(0), qPrintable(receivedPath.at(0)));
     QCOMPARE(QFileInfo(receivedPath.at(0)).fileName(), QStringLiteral("cli.bin"));
     QCOMPARE(lanrdp::sha256Of(readWholeFile(receivedPath.at(0))), lanrdp::sha256Of(content));
+
+    // 状态栏要说清**收到了哪个文件**：只写「文件接收完成」时，用户还得去接收
+    // 目录里按时间翻（自定义目录更容易迷路），而路径只出现在日志文件里。
+    auto *recvStatus = host.findChild<QLabel *>(QStringLiteral("statusLabel"));
+    QVERIFY(recvStatus);
+    QVERIFY2(recvStatus->text().contains(QStringLiteral("cli.bin")),
+             qPrintable(recvStatus->text()));
 
     // 收尾要真的走完（对端读到 EOF 会关掉它那一侧）
     QTRY_COMPARE_WITH_TIMEOUT(closed.count(), 1, 30000);

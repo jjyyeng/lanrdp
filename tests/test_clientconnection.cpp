@@ -38,6 +38,8 @@ private slots:
     void authRejectionStopsAutoReconnect();
     // 退役 socket 的迟到错误不许结算到新一轮尝试上（否则新连接永远 ready 不了）
     void errorFromRetiredSocketIsNotCurrent();
+    // 连着的时候再连一次：旧 socket 的临终 disconnected 不许拆掉新连接
+    void reconnectingWhileConnectedKeepsNewSession();
 };
 
 // 传输 id 从随机值起步、同连接内递增。
@@ -265,6 +267,53 @@ void TestClientConnection::errorFromRetiredSocketIsNotCurrent()
              "会话已拆除时没有「当前 socket」，任何错误都不该结算");
 
     delete retired;   // current 随 session 析构回收
+}
+
+// 连着的时候再连一次（点【重连】、或对同一格重复发起连接）：新连接必须活下来。
+//
+// 病灶：socket 的 disconnected 处理没判归属。teardown() 把旧 Session 交给
+// deleteLater，旧 socket 那一刻**仍连着**；下一轮事件循环回收它时，QTcpSocket
+// 的析构会**同步**发 disconnected ⇒ onSocketDisconnected() 把 teardown() 刚建好
+// 的新会话一并拆掉。界面上的表现就是「重连后画面一闪就断」。
+//
+// 判据用两条：新连接要真的就绪（关掉自动重连，否则重连兜底会把症状盖掉），
+// 以及全程不许出现 connectionLost —— 这是我们主动换连接，不是「断了」。
+void TestClientConnection::reconnectingWhileConnectedKeepsNewSession()
+{
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    QVERIFY2(host.listen(0, QHostAddress::LocalHost), "被控端应当能在随机端口上监听");
+
+    lanrdp::ClientConnection conn;
+    conn.setAutoReconnectEnabled(false);
+
+    conn.connectTo(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+
+    QElapsedTimer t;
+    t.start();
+    while (!conn.ready() && t.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    QVERIFY2(conn.ready(), "首次连接应当能建立");
+
+    int lostCount = 0;
+    QObject::connect(&conn, &lanrdp::ClientConnection::connectionLost, &conn,
+                     [&lostCount]() { ++lostCount; });
+
+    // 第二次连接：此刻旧 socket 还没被回收，仍在 ConnectedState。
+    conn.connectTo(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+
+    // 强制处理 DeferredDelete —— processEvents() 不做这一步，而「旧 socket 析构」
+    // 正是旧实现里新连接被拆的那一刻。
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+    QVERIFY2(conn.session() != nullptr, "重连之后必须持有新的会话（旧会话的析构不许清空它）");
+
+    t.restart();
+    while (!conn.ready() && t.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    QVERIFY2(conn.ready(), "重连之后新连接应当照常就绪");
+    QCOMPARE(lostCount, 0);   // 旧实现这里为 1
+
+    conn.disconnectNow();
 }
 
 QTEST_GUILESS_MAIN(TestClientConnection)

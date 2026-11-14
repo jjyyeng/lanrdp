@@ -77,4 +77,36 @@ inline bool isReleaseEvent(const InputEvent &event)
     return event.kind == InputKind::MouseButton && !event.pressed;
 }
 
+// ---- 按下集记账用的「复合键」 ----
+//
+// 左右 Ctrl / Alt / Win 在 Win32 里**共用同一个通用 VK**（0x11 / 0x12 / 0x5B 系），
+// 能区分左右的只有 KEYEVENTF_EXTENDEDKEY 这一位（右 Shift 例外，它有自己的
+// VK_RSHIFT，靠扩展位反而分不出来 —— 见 viewer/KeyMap.cpp）。
+//
+// 所以「当前按着哪些键」不能只记 vk：
+//   · 只按 vk 记 ⇒ 同时按住左右 Ctrl 时松开一个，另一个被当成也松了；
+//   · 抬起不带扩展位 ⇒ 右 Ctrl 按下、左 Ctrl 抬起，右边那个永久卡住（已实测：
+//     GetAsyncKeyState(VK_RCONTROL) 一直为按下）。
+constexpr std::uint32_t PressedKeyExtended = 0x10000u;
+
+inline std::uint32_t pressedKeyToken(std::uint16_t vk, bool extended)
+{
+    return static_cast<std::uint32_t>(vk) | (extended ? PressedKeyExtended : 0u);
+}
+
+inline std::uint32_t pressedKeyTokenOf(const InputEvent &event)
+{
+    return pressedKeyToken(event.vk, (event.flags & InputFlagExtended) != 0);
+}
+
+inline std::uint16_t pressedKeyVk(std::uint32_t token)
+{
+    return static_cast<std::uint16_t>(token & 0xFFFFu);
+}
+
+inline bool pressedKeyIsExtended(std::uint32_t token)
+{
+    return (token & PressedKeyExtended) != 0u;
+}
+
 } // namespace lanrdp

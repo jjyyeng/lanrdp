@@ -1,7 +1,7 @@
 #include "viewer/H264Decoder.h"
 
-#include "host/ColorConvert.h"
-#include "host/MfRuntime.h"
+#include "common/ColorConvert.h"
+#include "common/MfRuntime.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN

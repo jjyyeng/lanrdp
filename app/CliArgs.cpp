@@ -39,6 +39,21 @@ bool parseUShort(const QString &text, quint16 *out)
     return true;
 }
 
+// 解析端口（1–65535）。
+//
+// 与 parseUShort 分开是必要的：端口 0 对 `listen()` 是「让系统挑一个随机空闲端口」，
+// 而对本程序的 CLI 没有这种语义 —— 它只会让日志和界面显示一个**实际没在听**的端口
+//（`--host 0` 之后界面照写 9000，对端怎么连都超时，排障时极具误导性）。
+// 像素宽高一类的数值仍走 parseUShort，那里的 0 只是「没给」，不代表端口。
+bool parsePort(const QString &text, quint16 *out)
+{
+    quint16 value = 0;
+    if (!parseUShort(text, &value) || value == 0)
+        return false;
+    *out = value;
+    return true;
+}
+
 } // namespace
 
 const char *cliUsage()
@@ -73,7 +88,7 @@ CliParseResult parseCliArgs(const QStringList &args)
                 break;
             }
             o.hostMode = true;
-            if (!parseUShort(*portText, &o.hostPort)) {
+            if (!parsePort(*portText, &o.hostPort)) {
                 error = QStringLiteral("--host 的端口非法：%1").arg(*portText);
                 break;
             }
@@ -96,7 +111,7 @@ CliParseResult parseCliArgs(const QStringList &args)
             const int colon = endpointText->lastIndexOf(QLatin1Char(':'));
             if (colon > 0) {
                 o.peerHost = endpointText->left(colon);
-                if (!parseUShort(endpointText->mid(colon + 1), &o.peerPort)) {
+                if (!parsePort(endpointText->mid(colon + 1), &o.peerPort)) {
                     error = QStringLiteral("--connect 的端口非法：%1").arg(*endpointText);
                     break;
                 }

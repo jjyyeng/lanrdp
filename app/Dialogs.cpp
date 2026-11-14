@@ -1,14 +1,17 @@
 #include "app/Dialogs.h"
 
 #include "app/PasswordEdit.h"
+#include "common/LanAddresses.h"
 
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -59,6 +62,22 @@ constexpr BitrateChoice kBitrateChoices[] = {
     {16 * 1000 * 1000, "16 Mbps"},
 };
 
+// 「流量未加密」提示。TLS 定为不做（局域网自用），但取舍必须摊在用户眼前 ——
+// 尤其要挡住「把监听端口映射到公网」这种误用，那是本项目最坏的一种用法。
+//
+// 两个入口各一条，而不是只在别处交代一句：用户是在弹窗里做决定的。
+// 颜色由主题 QSS 的 #insecureHint 规则给出（warning 档，比正文醒目、又不是错误）。
+QLabel *makeInsecureHint(QWidget *parent)
+{
+    auto *label = new QLabel(parent);
+    label->setObjectName(QStringLiteral("insecureHint"));
+    label->setWordWrap(true);
+    label->setText(QCoreApplication::translate(
+        "lanrdp",
+        "流量未加密，请仅在可信局域网内使用，不要把端口映射到公网。"));
+    return label;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -68,7 +87,7 @@ constexpr BitrateChoice kBitrateChoices[] = {
 HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     : QDialog(parent)
 {
-    setWindowTitle(QStringLiteral("开始监听"));
+    setWindowTitle(tr("开始监听"));
     setMinimumWidth(kDialogMinWidth);
 
     auto *form = new QFormLayout();
@@ -79,13 +98,13 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     port_->setObjectName(QStringLiteral("portEdit"));
     port_->setRange(kMinPort, kMaxPort);
     port_->setValue(int(initial.port));
-    port_->setToolTip(QStringLiteral("通常无需修改。若提示端口被占用，请更换为 1024 以上的其他端口。"));
+    port_->setToolTip(tr("通常无需修改。若提示端口被占用，请更换为 1024 以上的其他端口。"));
 
     password_ = new PasswordEdit(this);
     password_->setText(initial.password);
     password_->setObjectName(QStringLiteral("passwordEdit"));
-    password_->setPlaceholderText(QStringLiteral("至少 6 位"));
-    password_->setToolTip(QStringLiteral("对方连接本机时必须输入相同的访问口令。"));
+    password_->setPlaceholderText(tr("至少 6 位"));
+    password_->setToolTip(tr("对方连接本机时必须输入相同的访问口令。"));
 
     // 口令不合规时的红字，**平时不占位**（隐藏）—— 点【开始监听】才校验。
     // 预先禁用按钮的话，用户输错时看不出为什么，比报错更难受。
@@ -102,14 +121,14 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
         : initial.receiveDir;
     recvDir_ = new QLineEdit(recvDir, this);
     recvDir_->setObjectName(QStringLiteral("recvDirEdit"));
-    recvDir_->setToolTip(QStringLiteral(
+    recvDir_->setToolTip(tr(
         "对方发送的文件将保存到此目录（不存在时自动创建）。\n"
         "文件重名时自动追加 -1、-2 等后缀，不会覆盖已有文件。"));
-    auto *browse = new QPushButton(QStringLiteral("浏览…"), this);
+    auto *browse = new QPushButton(tr("浏览…"), this);
     browse->setObjectName(QStringLiteral("browseRecvDirButton"));
     connect(browse, &QPushButton::clicked, this, [this] {
         const QString picked = QFileDialog::getExistingDirectory(
-            this, QStringLiteral("选择接收目录"), recvDir_->text());
+            this, tr("选择接收目录"), recvDir_->text());
         if (!picked.isEmpty())
             recvDir_->setText(picked);
     });
@@ -118,10 +137,10 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     dirRow->addWidget(recvDir_, 1);
     dirRow->addWidget(browse);
 
-    h264_ = new QCheckBox(QStringLiteral("压缩画面传输（推荐）"), this);
+    h264_ = new QCheckBox(tr("压缩画面传输（推荐）"), this);
     h264_->setObjectName(QStringLiteral("h264Check"));
     h264_->setChecked(initial.useH264);
-    h264_->setToolTip(QStringLiteral(
+    h264_->setToolTip(tr(
         "开启后画面先压缩再传输，可显著降低带宽占用，网络不佳时更流畅。\n"
         "仅排查问题时需要关闭。"));
 
@@ -135,24 +154,70 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     // 命令行 `--bitrate` 收的是任意正整数，不在档位里就补一条当前值 ——
     // 四舍五入到最近档等于**静默改掉**用户明确设过的数字，那是另一种"不生效"。
     if (bitrate_->findData(wantedBitrate) < 0) {
-        bitrate_->addItem(QStringLiteral("%1 Mbps（当前）")
+        bitrate_->addItem(tr("%1 Mbps（当前）")
                               .arg(wantedBitrate / 1000000.0, 0, 'f', 1),
                           wantedBitrate);
     }
     bitrate_->setCurrentIndex(bitrate_->findData(wantedBitrate));
-    bitrate_->setToolTip(QStringLiteral(
+    bitrate_->setToolTip(tr(
         "画面压缩后允许通过的码率上限，实际码率会随网络状况自动下调。\n"
         "画面越大、细节越多（如 4K），这个值越要往高选。"));
     // 裸帧路径没有码率可调（帧直接下发，不经过编码器），勾掉压缩时这一项没有意义。
     bitrate_->setEnabled(initial.useH264);
     connect(h264_, &QCheckBox::toggled, bitrate_, &QWidget::setEnabled);
 
-    form->addRow(QStringLiteral("监听端口"), port_);
-    form->addRow(QStringLiteral("访问口令"), password_);
+    form->addRow(tr("监听端口"), port_);
+
+    // 口令行：输入框 + 【生成】。
+    //
+    // 生成 12 位随机串（排除易混字符，规则见 PasswordPolicy.h）。生成后**自动切到
+    // 可见** —— 这个动作本身就意味着「我要把它念给旁边的人」，藏着反而容易抄错；
+    // 不想明文再点一下眼睛即可，状态不落盘。
+    auto *passwordRow = new QWidget(this);
+    auto *passwordLayout = new QHBoxLayout(passwordRow);
+    passwordLayout->setContentsMargins(0, 0, 0, 0);
+    passwordLayout->setSpacing(6);
+    passwordLayout->addWidget(password_);
+
+    auto *generateButton = new QPushButton(tr("生成"), passwordRow);
+    generateButton->setObjectName(QStringLiteral("generatePasswordButton"));
+    generateButton->setToolTip(tr(
+        "生成一个随机口令，不使用容易看错的字符（0 / O / 1 / l / I）。"));
+    passwordLayout->addWidget(generateButton);
+
+    form->addRow(tr("访问口令"), passwordRow);
     form->addRow(passwordError_);   // 横跨两列（挤在字段列里会断在词中间）；平时隐藏
-    form->addRow(QStringLiteral("接收目录"), dirRow);
+
+    // 「连我」：把对方要填的地址直接摆出来，省掉「先去查本机 IP」这一步。
+    //
+    // 本机常有多条路（有线 + 无线 + 虚拟网卡），选错地址是局域网工具最典型的首连
+    // 失败；这里只列真实可达的那几条（过滤逻辑在 common/LanAddresses）。
+    // 端口不写死在这行里 —— 用户随时会改，复制时实时读。
+    auto *addressRow    = new QWidget(this);
+    auto *addressLayout = new QHBoxLayout(addressRow);
+    addressLayout->setContentsMargins(0, 0, 0, 0);
+    addressLayout->setSpacing(6);
+
+    const QStringList localAddrs = lanAddresses();
+    auto *addressLabel = new QLabel(lanAddressSummary(localAddrs), addressRow);
+    addressLabel->setObjectName(QStringLiteral("lanAddressLabel"));
+    addressLabel->setWordWrap(true);
+    addressLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    addressLayout->addWidget(addressLabel, 1);
+
+    auto *copyAddressButton = new QPushButton(tr("复制"), addressRow);
+    copyAddressButton->setObjectName(QStringLiteral("copyLanAddressButton"));
+    copyAddressButton->setToolTip(tr("复制成「地址:端口」，直接发给对方。"));
+    copyAddressButton->setEnabled(!localAddrs.isEmpty());
+    addressLayout->addWidget(copyAddressButton);
+
+    form->addRow(tr("对方可用地址"), addressRow);
+    form->addRow(tr("接收目录"), dirRow);
     form->addRow(h264_);   // 横跨两列
-    form->addRow(QStringLiteral("画面码率"), bitrate_);
+    form->addRow(tr("画面码率"), bitrate_);
+
+    // 未加密提示放在防火墙提示之前：它比「连不上」更要紧。
+    form->addRow(makeInsecureHint(this));
 
     // 防火墙提示。
     //
@@ -175,12 +240,12 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     // 单参数 addRow 的 label 会紧贴上一行（表单的 verticalSpacing 管不到它的上方），
     // 补一点上边距，否则复选框和这段说明会挤成一块。
     firewallHint->setContentsMargins(0, 6, 0, 0);
-    firewallHint->setText(QStringLiteral("若连接不上，请在 Windows 防火墙中放行本程序。"));
+    firewallHint->setText(tr("若连接不上，请在 Windows 防火墙中放行本程序。"));
     form->addRow(firewallHint);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("开始监听"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("开始监听"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(tr("取消"));
     // 校验在 accept() 覆写里（唯一入口：点按钮和直接调 accept() 走同一条路）。
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -188,6 +253,18 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     // 一旦开始改就把上一轮的报错收起来（否则改对了红字还杵在那儿）。
     connect(password_, &QLineEdit::textChanged, this, [this](const QString &) {
         passwordError_->setVisible(false);
+    });
+
+    connect(generateButton, &QPushButton::clicked, this, [this] {
+        password_->setText(generatePassword());
+        password_->setPasswordVisible(true);
+        passwordError_->setVisible(false);   // setText 已触发上面的收起，这里显式再说一次意图
+    });
+
+    connect(copyAddressButton, &QPushButton::clicked, this, [this, localAddrs] {
+        // 端口实时读：用户可能刚把上面的输入框改过。
+        QGuiApplication::clipboard()->setText(
+            connectionCardText(localAddrs, quint16(port_->value())));
     });
 
     auto *box = new QVBoxLayout(this);
@@ -219,7 +296,7 @@ void HostConfigDialog::accept()
 {
     if (!isValidPassword(password_->text())) {
         passwordError_->setText(
-            QStringLiteral("口令至少 6 位，且只能用英文字母、数字和符号。"));
+            tr("口令至少 6 位，且只能用英文字母、数字和符号。"));
         passwordError_->setVisible(true);
         password_->setFocus();
         return;   // 不关窗口：让用户就地改
@@ -234,7 +311,7 @@ void HostConfigDialog::accept()
 ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
     : QDialog(parent)
 {
-    setWindowTitle(QStringLiteral("新连接"));
+    setWindowTitle(tr("新连接"));
     setMinimumWidth(kDialogMinWidth);   // 与【开始监听…】同宽，来回切换时窗口不跳
 
     auto *form = new QFormLayout();
@@ -243,7 +320,7 @@ ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
 
     host_ = new QLineEdit(initial.host, this);
     host_->setObjectName(QStringLiteral("peerHostEdit"));
-    host_->setToolTip(QStringLiteral("远程电脑的 IP 地址或主机名。"));
+    host_->setToolTip(tr("远程电脑的 IP 地址或主机名。"));
 
     port_ = new QSpinBox(this);
     port_->setObjectName(QStringLiteral("peerPortEdit"));
@@ -253,7 +330,7 @@ ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
     password_ = new PasswordEdit(this);
     password_->setText(initial.password);
     password_->setObjectName(QStringLiteral("connectPasswordEdit"));
-    password_->setPlaceholderText(QStringLiteral("至少 6 位"));
+    password_->setPlaceholderText(tr("至少 6 位"));
 
     // 与【开始监听…】同款的红字：平时隐藏，点【连接】才校验。
     // 地址与口令共用这一条 —— 两类错误都属于「这一栏没填对」，不该用两种呈现方式。
@@ -262,14 +339,15 @@ ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
     error_->setWordWrap(true);
     error_->setVisible(false);
 
-    form->addRow(QStringLiteral("对方地址"), host_);
-    form->addRow(QStringLiteral("对方端口"), port_);
-    form->addRow(QStringLiteral("访问口令"), password_);
+    form->addRow(tr("对方地址"), host_);
+    form->addRow(tr("对方端口"), port_);
+    form->addRow(tr("访问口令"), password_);
     form->addRow(error_);   // 横跨两列；平时隐藏
+    form->addRow(makeInsecureHint(this));
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("连接"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("连接"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(tr("取消"));
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
@@ -304,14 +382,14 @@ void ConnectDialog::accept()
     if (host_->text().trimmed().isEmpty()) {
         // 与口令错误同一条红字、同一个位置：别用「改 placeholder」这种一次性提示 ——
         // 用户根本分不清它跟红字是不是同一件事，而且下一次打开窗口它还在。
-        error_->setText(QStringLiteral("请填写对方地址。"));
+        error_->setText(tr("请填写对方地址。"));
         error_->setVisible(true);
         host_->setFocus();
         return;
     }
     if (!isValidPassword(password_->text())) {
         error_->setText(
-            QStringLiteral("口令至少 6 位，且只能用英文字母、数字和符号。"));
+            tr("口令至少 6 位，且只能用英文字母、数字和符号。"));
         error_->setVisible(true);
         password_->setFocus();
         return;
@@ -326,46 +404,46 @@ void ConnectDialog::accept()
 SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     : QDialog(parent)
 {
-    setWindowTitle(QStringLiteral("设置"));
+    setWindowTitle(tr("设置"));
 
-    autoReconnect_ = new QCheckBox(QStringLiteral("断线自动重连"), this);
+    autoReconnect_ = new QCheckBox(tr("断线自动重连"), this);
     autoReconnect_->setObjectName(QStringLiteral("autoReconnectCheck"));
     autoReconnect_->setChecked(initial.autoReconnect);
-    autoReconnect_->setToolTip(QStringLiteral(
+    autoReconnect_->setToolTip(tr(
         "连接意外断开后自动重试，重连间隔从 1 秒逐步延长至 30 秒。\n"
         "点击【断开】或取消勾选后不再重连。"));
 
-    input_ = new QCheckBox(QStringLiteral("启用远程键鼠控制"), this);
+    input_ = new QCheckBox(tr("启用远程键鼠控制"), this);
     input_->setObjectName(QStringLiteral("inputCheck"));
     input_->setChecked(initial.inputEnabled);
-    input_->setToolTip(QStringLiteral(
+    input_->setToolTip(tr(
         "开启后，本机的鼠标与键盘操作将发送至对方电脑。\n"
         "需先点击画面取得焦点，键盘操作方可生效。\n"
         "关闭后，本机操作不影响对方。"));
 
-    tray_ = new QCheckBox(QStringLiteral("最小化时收进通知区域"), this);
+    tray_ = new QCheckBox(tr("最小化时收进通知区域"), this);
     tray_->setObjectName(QStringLiteral("trayResidentCheck"));
     tray_->setChecked(initial.trayResident);
-    tray_->setToolTip(QStringLiteral(
+    tray_->setToolTip(tr(
         "开启后，最小化窗口会收进屏幕右下角的通知区域，任务栏上不再占位置。\n"
         "双击通知区域的图标即可恢复窗口；右键图标可停止共享或退出程序。\n"
         "收进通知区域期间，程序仍在后台运行。"));
 
-    singleInstance_ = new QCheckBox(QStringLiteral("只允许运行一个程序窗口"), this);
+    singleInstance_ = new QCheckBox(tr("只允许运行一个程序窗口"), this);
     singleInstance_->setObjectName(QStringLiteral("singleInstanceCheck"));
     singleInstance_->setChecked(initial.singleInstance);
-    singleInstance_->setToolTip(QStringLiteral(
+    singleInstance_->setToolTip(tr(
         "开启后，再次启动程序不会开出第二个窗口，而是把已有的这个叫到前台。\n"
         "适合常驻后台共享时防止误开多个程序。\n"
         "命令行方式（脚本自测）不受此限制。"));
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("确定"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(tr("取消"));
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    auto *hint = new QLabel(QStringLiteral(
+    auto *hint = new QLabel(tr(
         "以上设置仅本次运行有效，退出程序后不保留。"), this);
     hint->setObjectName(QStringLiteral("formHint"));
     hint->setWordWrap(true);

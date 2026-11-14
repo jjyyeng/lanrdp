@@ -23,6 +23,7 @@
 #include "net/Auth.h"
 #include "net/Session.h"
 #include "protocol/Frame.h"
+#include "protocol/InputEvent.h"
 #include "protocol/ScreenControl.h"
 
 // 被控端宿主边界（host/HostController）的契约：监听 / 会话池快照 /
@@ -92,12 +93,18 @@ private slots:
     void stopIsIdempotent();
 
     void authenticatedClientAppearsInClients();
+    // 鉴权日志要带会话号与握手耗时
+    void authenticatedLogCarriesSessionId();
     void clientDisconnectRemovesItFromList();
 
     void tokenRequestIsGrantedToFirstClient();
     void takeInputLocksAndDropsHolder();
     void unlockInputAllowsRequestsAgain();
     void stopClearsClientsAndLock();
+
+    // 断开 / 收权时「补发抬起」必须也覆盖键盘 —— 卡住的修饰键会让被控端
+    // 后续所有输入变形，而键盘没有任何自动恢复的途径。
+    void holderDisconnectReleasesStuckKeys();
 
     void receiveDirRoundTrips();
     void codecChoiceIsRemembered();
@@ -187,6 +194,40 @@ void TestHostController::authenticatedClientAppearsInClients()
     QVERIFY2(!list.first().isHolder, "刚连上还没请求令牌，不该是持有者");
 }
 
+// 鉴权日志要带会话号与握手耗时：排障时最常被问的就是「到底连上没有、等了多久」，
+// 而这两条以前只能从时间戳去猜。
+//
+// ⚠️ 用 QSignalSpy 而不是「lambda 捕获局部的 QStringList」：HostController 析构时
+// 还会 emit 日志，而局部容器的销毁顺序在它之前 —— 那样写会在用例**结束后**踩到
+// 已析构的对象，症状是堆损坏、崩在下一个用例（排查极费劲）。
+void TestHostController::authenticatedLogCarriesSessionId()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    QSignalSpy spy(&hc, &lanrdp::HostController::logLine);
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    QString authed;
+    for (const QList<QVariant> &args : spy) {
+        const QString line = args.at(0).toString();
+        if (line.contains(QStringLiteral("鉴权")))
+            authed = line;
+    }
+    QVERIFY2(!authed.isEmpty(), "应当有一条鉴权通过的日志");
+    QVERIFY2(authed.contains(QStringLiteral("会话 #")), qPrintable(authed));
+    QVERIFY2(authed.contains(QStringLiteral("握手")), qPrintable(authed));
+    QVERIFY2(authed.contains(QStringLiteral("ms")), qPrintable(authed));
+}
+
 void TestHostController::clientDisconnectRemovesItFromList()
 {
     lanrdp::HostController hc;
@@ -237,6 +278,62 @@ void TestHostController::tokenRequestIsGrantedToFirstClient()
     QTRY_VERIFY(hc.holderSession() != nullptr);
     QVERIFY(!hc.inputLocked());
     QVERIFY(hc.clients().first().isHolder);
+}
+
+// 控制端按住一个键之后连接断掉 —— 那一针「抬起」再也送不到，被控端必须自己补。
+// 不补的症状：那个键永久停在按下态（Shift 卡住则后续全大写，Ctrl 卡住则点什么
+// 都是组合键），而键盘没有任何「等一下自己就恢复」的可能。
+//
+// ⚠️ 本条走**真实注入**：注入不进去（锁屏 / 前台窗口权限更高）就 skip ——
+// 那说明测的不是本类的逻辑。
+void TestHostController::holderDisconnectReleasesStuckKeys()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    // 没令牌的输入会被门控丢掉，连注入都不会发生
+    lanrdp::Frame req;
+    req.type = static_cast<std::uint8_t>(lanrdp::FrameType::TokenReq);
+    client.sendFrame(req);
+    QTRY_VERIFY(hc.holderSession() != nullptr);
+
+    // F24：任何程序都不绑定它，注入不干扰本机桌面。
+    lanrdp::InputEvent down;
+    down.kind = lanrdp::InputKind::KeyDown;
+    down.vk   = 0x87;   // VK_F24
+
+    lanrdp::Frame frame;
+    frame.type    = static_cast<std::uint8_t>(lanrdp::FrameType::InputEvent);
+    frame.payload = lanrdp::encodeInputEvent(down);
+    client.sendFrame(frame);
+
+    QTest::qWait(300);   // loopback 往返 + 注入
+    if (hc.injectedCount() == 0)
+        QSKIP("这一针没注入进去（锁屏 / 前台窗口权限更高），测不到本条逻辑");
+
+    QSignalSpy spy(&hc, &lanrdp::HostController::logLine);
+
+    // 抬起永远送不到：连接在这里断掉
+    client.socket()->abort();
+    QTRY_COMPARE(hc.clientCount(), 0);
+
+    QString release;
+    for (const QList<QVariant> &args : spy) {
+        const QString line = args.at(0).toString();
+        if (line.contains(QStringLiteral("补发")))
+            release = line;
+    }
+    QVERIFY2(!release.isEmpty(), "断开时应当补发一条抬起日志");
+    QVERIFY2(release.contains(QStringLiteral("按键")), qPrintable(release));
 }
 
 void TestHostController::takeInputLocksAndDropsHolder()

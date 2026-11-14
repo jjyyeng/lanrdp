@@ -1,6 +1,6 @@
 #include "host/AudioCapturer.h"
 
-#include "host/MfRuntime.h"   // 复用 hrText()：HRESULT → 可读文案
+#include "common/MfRuntime.h"   // 复用 hrText()：HRESULT → 可读文案
 
 #include <audioclient.h>
 #include <ksmedia.h>

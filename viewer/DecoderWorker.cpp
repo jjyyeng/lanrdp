@@ -1,6 +1,6 @@
 #include "viewer/DecoderWorker.h"
 
-#include "host/MfRuntime.h"
+#include "common/MfRuntime.h"
 #include "viewer/H264Decoder.h"
 
 #include <QElapsedTimer>

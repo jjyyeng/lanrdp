@@ -1,4 +1,4 @@
-#include "app/Glyph.h"
+#include "ui/Glyph.h"
 
 #include <QIconEngine>
 #include <QPainter>

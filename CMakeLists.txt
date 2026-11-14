@@ -21,7 +21,7 @@ if (WIN32)
     enable_language(RC)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Test LinguistTools)
 
 # ---------------------------------------------------------------------------
 # lanrdp_core：可测试的核心代码（协议 / 网络 / 抓屏 / 注入），与 UI 解耦
@@ -52,8 +52,13 @@ add_library(lanrdp_core STATIC
     # 被控端宿主边界（监听 + 会话池 + 抓屏编码 + 注入 + 文件 + 令牌）。
     # 不依赖 QWidget / QClipboard，故进 core —— 也便于单独单测。
     host/HostController.cpp
-    host/ColorConvert.cpp
-    host/MfRuntime.cpp
+    common/ColorConvert.cpp
+    common/MfRuntime.cpp
+    # 「连我」卡片的地址筛选（纯名字判断 + QNetworkInterface 枚举）
+    common/LanAddresses.cpp
+    # 界面语言：QTranslator 装卸 + 「跟随系统」的判定。只依赖 QtCore，
+    # 放 core 让 test_i18n 能直接链它 —— 语言这种全局状态最该有断言。
+    common/I18n.cpp
     host/H264Encoder.cpp
     # 音频：被控端扇出（目标管理 + 格式补发 + 逐目标背压丢块）
     host/AudioStreamer.cpp
@@ -71,7 +76,7 @@ add_library(lanrdp_core STATIC
     viewer/AudioPlayer.cpp
     # Phase 11②：日志端口（内存缓冲 + 落盘）。纯逻辑、不依赖 QWidget，
     # 放 core 让 app 与测试都能直接链接，不必各自重复列出。
-    app/LogPort.cpp
+    common/LogPort.cpp
     # 会话启动参数的落盘（QSettings + DPAPI）。同上：不依赖 QWidget，
     # 放 core 才能被 test_sessionstore 直链 —— 落盘逻辑最需要单测，
     # 却又最容易被"只能从 UI 走一遍"挡在门外。
@@ -122,10 +127,10 @@ set(LANRDP_UI_SOURCES
     # 才真的创建，关着的时候它只是个不碰平台的状态记录器。
     app/TrayController.cpp
     # 界面外观：深色 palette + 全局 QSS + 悬浮条内务样式（色值的唯一出处）
-    app/Theme.cpp
+    ui/Theme.cpp
     # 矢量图标（QPainterPath 按 24 格绘制）：不依赖 qrc / qsvgicon 插件，
     # 任意尺寸与 DPI 都按目标尺寸重画，配色随调用方传入。
-    app/Glyph.cpp
+    ui/Glyph.cpp
     # Phase 17：三个启动/设置对话框（【开始监听…】/【新连接…】/【设置…】）
     app/Dialogs.cpp
     # 口令框（内嵌「显示 / 隐藏」开关），两个启动对话框共用
@@ -139,6 +144,8 @@ set(LANRDP_UI_SOURCES
     viewer/RemoteView.cpp
     # 空态层：未选模式时盖在画面上的两个入口（连接对方 / 让对方连进来）
     viewer/EmptyState.cpp
+    # 会话期间把 Alt 从本机菜单栏手里截下来（否则远端 Alt 卡住、本机键盘断流）
+    viewer/ModifierKeyGuard.cpp
 )
 
 # exe 资源段（程序图标 + 版本信息）。.rc 由 CMake 生成 —— 版本号只有 project(VERSION) 一处出处。
@@ -163,49 +170,112 @@ target_link_libraries(lanrdp PRIVATE
 )
 
 # ---------------------------------------------------------------------------
+# 界面语言翻译
+# ---------------------------------------------------------------------------
+# **中文是源语言**：源码里 tr("…") 的字面量就是最终中文，中文档不装任何翻译器。
+# 英文在 translations/lanrdp_en.ts 里维护，构建时由 lrelease 编成 .qm 并嵌进
+# exe 资源（:/i18n/lanrdp_en.qm）—— dist/ 因此不必额外带 .qm 文件，也不会
+# 出现「换了语言却没带翻译包」这种只在别人机器上复现的问题。
+#
+# ⚠️ 改了界面文案要更新 .ts，否则新条目在英文界面下会退化成中文：
+#     cmake --build build --target update_translations
+# 然后到 .ts 里补 <translation>，再正常构建（lrelease 是构建期自动跑的）。
+qt_add_translations(lanrdp
+    TS_FILES translations/lanrdp_en.ts
+    # ⚠️ 头文件里的 inline 文案也必须显式列出：lupdate 只扫 target 的**源文件列表**，
+    # 被 include 的 .h 不在列表里就整批漏抽（症状是英文界面下那几句仍是中文，
+    # 而 .ts 里根本查不到）。ConnectionHints.h 就是唯一一处这类实现。
+    SOURCES common/ConnectionHints.h
+    # 删掉的界面文案不该赖在 .ts 里：留着 obsolete 条目会让「还剩几条没翻」
+    # 这个数永远对不上（也体检不出真的漏译）。
+    LUPDATE_OPTIONS -no-obsolete
+    RESOURCE_PREFIX "/i18n"
+)
+
+# ---------------------------------------------------------------------------
 # 测试
 # ---------------------------------------------------------------------------
 enable_testing()
 
-add_executable(test_frame tests/test_frame.cpp)
-target_link_libraries(test_frame PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_frame COMMAND test_frame)
+# ---------------------------------------------------------------------------
+# 测试注册的统一入口
+# ---------------------------------------------------------------------------
+# 每个测试目标都是「建 exe + 链 lanrdp_core / Qt6::Test + 注册 ctest」三件套。
+# 从前 44 处各写一遍，新增一个测试要动两处（注册 + 末尾的 Qt 测试名单）。
+# 这个函数把三件事收成一行，并顺手把名字记进全局属性 —— 末尾设 ENVIRONMENT 时
+# 直接取用，不再需要手工维护第二份名单（那份曾漏过 test_clientconnection，
+# 症状是「本机能跑、干净机器上找不到 Qt DLL」）。
+#
+# LABELS 只表达「跑它需要什么环境」，不表达重要程度：
+#   unit  = 纯逻辑，任何机器都能跑
+#   ui    = 需要 Qt Widgets（offscreen 平台即可，不需要真窗口）
+#   net   = 起真实 TCP / 命名管道
+#   gfx   = 需要真实桌面或显示器（DXGI 抓屏）
+#   media = 需要 H.264 MFT 或声卡
+function(lanrdp_add_test name)
+    cmake_parse_arguments(T "" "" "SOURCES;LIBS;LABELS" ${ARGN})
+    if (NOT T_SOURCES)
+        message(FATAL_ERROR "lanrdp_add_test(${name}) 缺少 SOURCES")
+    endif()
+    add_executable(${name} ${T_SOURCES})
+    target_link_libraries(${name} PRIVATE lanrdp_core Qt6::Test ${T_LIBS})
+    add_test(NAME ${name} COMMAND ${name})
+    if (T_LABELS)
+        set_tests_properties(${name} PROPERTIES LABELS "${T_LABELS}")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY LANRDP_QT_TESTS ${name})
+endfunction()
 
-add_executable(test_session tests/test_session.cpp)
-target_link_libraries(test_session PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_session COMMAND test_session)
 
-add_executable(test_auth tests/test_auth.cpp)
-target_link_libraries(test_auth PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_auth COMMAND test_auth)
+lanrdp_add_test(test_frame
+    SOURCES tests/test_frame.cpp
+    LABELS "unit"
+)
 
-add_executable(test_handshake tests/test_handshake.cpp)
-target_link_libraries(test_handshake PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_handshake COMMAND test_handshake)
+lanrdp_add_test(test_session
+    SOURCES tests/test_session.cpp
+    LABELS "net"
+)
 
-add_executable(test_capture tests/test_capture.cpp)
-target_link_libraries(test_capture PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_capture COMMAND test_capture)
+lanrdp_add_test(test_auth
+    SOURCES tests/test_auth.cpp
+    LABELS "net"
+)
 
-add_executable(test_screenframe tests/test_screenframe.cpp)
-target_link_libraries(test_screenframe PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_screenframe COMMAND test_screenframe)
+lanrdp_add_test(test_handshake
+    SOURCES tests/test_handshake.cpp
+    LABELS "net"
+)
 
-add_executable(test_streamer tests/test_streamer.cpp)
-target_link_libraries(test_streamer PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_streamer COMMAND test_streamer)
+lanrdp_add_test(test_capture
+    SOURCES tests/test_capture.cpp
+    LABELS "gfx"
+)
 
-add_executable(test_inputevent tests/test_inputevent.cpp)
-target_link_libraries(test_inputevent PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_inputevent COMMAND test_inputevent)
+lanrdp_add_test(test_screenframe
+    SOURCES tests/test_screenframe.cpp
+    LABELS "unit"
+)
 
-add_executable(test_injector tests/test_injector.cpp)
-target_link_libraries(test_injector PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_injector COMMAND test_injector)
+lanrdp_add_test(test_streamer
+    SOURCES tests/test_streamer.cpp
+    LABELS "net;gfx"
+)
 
-add_executable(test_keymap tests/test_keymap.cpp)
-target_link_libraries(test_keymap PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_keymap COMMAND test_keymap)
+lanrdp_add_test(test_inputevent
+    SOURCES tests/test_inputevent.cpp
+    LABELS "unit"
+)
+
+lanrdp_add_test(test_injector
+    SOURCES tests/test_injector.cpp
+    LABELS "unit"
+)
+
+lanrdp_add_test(test_keymap
+    SOURCES tests/test_keymap.cpp
+    LABELS "unit"
+)
 
 # UI 组件单独编译进测试（不依赖整个 app）。
 # ⚠️ 画面控件自己取主题色板（底色 / 空态文字 / 拖放高亮），所以**每个**单独
@@ -214,187 +284,264 @@ add_test(NAME test_keymap COMMAND test_keymap)
 # 看起来像测试本身崩了。
 set(LANRDP_RENDERER_SOURCES
     viewer/ScreenRenderer.cpp
-    app/Theme.cpp
+    viewer/ModifierKeyGuard.cpp
+    ui/Theme.cpp
 )
 
-add_executable(test_renderer tests/test_renderer.cpp ${LANRDP_RENDERER_SOURCES})
-target_link_libraries(test_renderer PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_renderer COMMAND test_renderer)
+lanrdp_add_test(test_renderer
+    SOURCES tests/test_renderer.cpp ${LANRDP_RENDERER_SOURCES}
+    LIBS Qt6::Widgets
+    LABELS "ui"
+)
 
-add_executable(test_inputmap tests/test_inputmap.cpp ${LANRDP_RENDERER_SOURCES})
-target_link_libraries(test_inputmap PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_inputmap COMMAND test_inputmap)
+lanrdp_add_test(test_inputmap
+    SOURCES tests/test_inputmap.cpp ${LANRDP_RENDERER_SOURCES}
+    LIBS Qt6::Widgets
+    LABELS "ui"
+)
 
 # 拖拽接收（Phase 7④）：firstLocalFile 纯函数判定
-add_executable(test_rendererdrop tests/test_rendererdrop.cpp ${LANRDP_RENDERER_SOURCES})
-target_link_libraries(test_rendererdrop PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_rendererdrop COMMAND test_rendererdrop)
+lanrdp_add_test(test_rendererdrop
+    SOURCES tests/test_rendererdrop.cpp ${LANRDP_RENDERER_SOURCES}
+    LIBS Qt6::Widgets
+    LABELS "ui"
+)
 
-add_executable(test_h264frame tests/test_h264frame.cpp)
-target_link_libraries(test_h264frame PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_h264frame COMMAND test_h264frame)
+lanrdp_add_test(test_h264frame
+    SOURCES tests/test_h264frame.cpp
+    LABELS "unit"
+)
 
-add_executable(test_colorconvert tests/test_colorconvert.cpp)
-target_link_libraries(test_colorconvert PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_colorconvert COMMAND test_colorconvert)
+lanrdp_add_test(test_colorconvert
+    SOURCES tests/test_colorconvert.cpp
+    LABELS "unit"
+)
 
 # 音频两帧的线上格式（AUDIO_CONFIG / AUDIO_DATA）与定长块装配器
-add_executable(test_audiochunk tests/test_audiochunk.cpp)
-target_link_libraries(test_audiochunk PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_audiochunk COMMAND test_audiochunk)
+lanrdp_add_test(test_audiochunk
+    SOURCES tests/test_audiochunk.cpp
+    LABELS "unit"
+)
 
 # 播放端抖动缓冲的策略（补静音 / 丢旧块，不依赖时钟）
-add_executable(test_audiojitter tests/test_audiojitter.cpp)
-target_link_libraries(test_audiojitter PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_audiojitter COMMAND test_audiojitter)
+lanrdp_add_test(test_audiojitter
+    SOURCES tests/test_audiojitter.cpp
+    LABELS "unit"
+)
 
 # 多屏两帧的线上格式（SCREEN_LIST / SCREEN_SELECT，协议 v5）
-add_executable(test_screencontrol tests/test_screencontrol.cpp)
-target_link_libraries(test_screencontrol PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_screencontrol COMMAND test_screencontrol)
+lanrdp_add_test(test_screencontrol
+    SOURCES tests/test_screencontrol.cpp
+    LABELS "unit"
+)
 
 # 窗口标题 / 任务栏角标的判据（纯函数：谁在看、显示成什么文案）
-add_executable(test_windowstatus tests/test_windowstatus.cpp)
-target_link_libraries(test_windowstatus PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_windowstatus COMMAND test_windowstatus)
+lanrdp_add_test(test_windowstatus
+    SOURCES tests/test_windowstatus.cpp
+    LABELS "unit"
+)
 
 # 通知区域图标：状态点 / 悬停提示 / 无托盘环境下的状态记录。
 # 需要 Widgets（QSystemTrayIcon），所以把它的三个依赖源一并列进来。
-add_executable(test_traycontroller tests/test_traycontroller.cpp
-    app/TrayController.cpp
-    app/Glyph.cpp
-    app/Theme.cpp
+lanrdp_add_test(test_traycontroller
+    SOURCES tests/test_traycontroller.cpp app/TrayController.cpp ui/Glyph.cpp ui/Theme.cpp
+    LIBS Qt6::Widgets
+    LABELS "ui"
 )
-target_link_libraries(test_traycontroller PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_traycontroller COMMAND test_traycontroller)
 
 # 单实例协调：命名管道监听 / 新实例探测 / fail-open / 名字释放
-add_executable(test_singleinstance tests/test_singleinstance.cpp)
-target_link_libraries(test_singleinstance PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_singleinstance COMMAND test_singleinstance)
+lanrdp_add_test(test_singleinstance
+    SOURCES tests/test_singleinstance.cpp
+    LABELS "unit"
+)
 
 # 被控端音频扇出（真 loopback 连接：目标管理 / 格式补发 / 背压丢块）
-add_executable(test_audiostreamer tests/test_audiostreamer.cpp)
-target_link_libraries(test_audiostreamer PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_audiostreamer COMMAND test_audiostreamer)
+lanrdp_add_test(test_audiostreamer
+    SOURCES tests/test_audiostreamer.cpp
+    LABELS "net;media"
+)
 
 # 音频的硬件往返（WASAPI loopback 采集 / 渲染）。没有音频设备的机器上 QSKIP。
 # ⚠️ 故意**不打桩**：这一层要测的正是设备交互本身。
-add_executable(test_audiohw tests/test_audiohw.cpp)
-target_link_libraries(test_audiohw PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_audiohw COMMAND test_audiohw)
+lanrdp_add_test(test_audiohw
+    SOURCES tests/test_audiohw.cpp
+    LABELS "media"
+)
 
-add_executable(test_h264encoder tests/test_h264encoder.cpp)
-target_link_libraries(test_h264encoder PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_h264encoder COMMAND test_h264encoder)
+lanrdp_add_test(test_h264encoder
+    SOURCES tests/test_h264encoder.cpp
+    LABELS "media"
+)
 
-add_executable(test_h264decoder tests/test_h264decoder.cpp)
-target_link_libraries(test_h264decoder PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_h264decoder COMMAND test_h264decoder)
+lanrdp_add_test(test_h264decoder
+    SOURCES tests/test_h264decoder.cpp
+    LABELS "media"
+)
 
 # Phase 15：解码移出 UI 线程 —— 解码线程对象的契约（含「产帧线程 ≠ 调用线程」的取证）
-add_executable(test_decoderworker tests/test_decoderworker.cpp)
-target_link_libraries(test_decoderworker PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_decoderworker COMMAND test_decoderworker)
+lanrdp_add_test(test_decoderworker
+    SOURCES tests/test_decoderworker.cpp
+    LABELS "media"
+)
 
 # Phase 15：ClientConnection 的 H.264 端到端回归（真连接 + 真编码器 + 真解码线程）
-add_executable(test_clientconnection_h264 tests/test_clientconnection_h264.cpp)
-target_link_libraries(test_clientconnection_h264 PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_clientconnection_h264 COMMAND test_clientconnection_h264)
+lanrdp_add_test(test_clientconnection_h264
+    SOURCES tests/test_clientconnection_h264.cpp
+    LABELS "net;media"
+)
 
 # ClientConnection 的通用行为（与上面的 _h264 分工：那个测媒体链路，这个测连接本身）。
 # 起于真机 bug：控制端连局域网 IP 被**系统代理**拦掉（"The proxy type is invalid"）。
-add_executable(test_clientconnection tests/test_clientconnection.cpp)
-target_link_libraries(test_clientconnection PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_clientconnection COMMAND test_clientconnection)
+lanrdp_add_test(test_clientconnection
+    SOURCES tests/test_clientconnection.cpp
+    LABELS "net"
+)
 
-add_executable(test_filetransfer tests/test_filetransfer.cpp)
-target_link_libraries(test_filetransfer PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_filetransfer COMMAND test_filetransfer)
+lanrdp_add_test(test_filetransfer
+    SOURCES tests/test_filetransfer.cpp
+    LABELS "unit"
+)
 
-add_executable(test_filereceiver tests/test_filereceiver.cpp)
-target_link_libraries(test_filereceiver PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_filereceiver COMMAND test_filereceiver)
+lanrdp_add_test(test_filereceiver
+    SOURCES tests/test_filereceiver.cpp
+    LABELS "unit"
+)
 
-add_executable(test_filesender tests/test_filesender.cpp)
-target_link_libraries(test_filesender PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_filesender COMMAND test_filesender)
+lanrdp_add_test(test_filesender
+    SOURCES tests/test_filesender.cpp
+    LABELS "net"
+)
 
-add_executable(test_filetransfer_e2e tests/test_filetransfer_e2e.cpp)
-target_link_libraries(test_filetransfer_e2e PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_filetransfer_e2e COMMAND test_filetransfer_e2e)
+lanrdp_add_test(test_filetransfer_e2e
+    SOURCES tests/test_filetransfer_e2e.cpp
+    LABELS "net"
+)
 
-add_executable(test_tokengate tests/test_tokengate.cpp)
-target_link_libraries(test_tokengate PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_tokengate COMMAND test_tokengate)
+lanrdp_add_test(test_tokengate
+    SOURCES tests/test_tokengate.cpp
+    LABELS "unit"
+)
 
-add_executable(test_hostserver tests/test_hostserver.cpp)
-target_link_libraries(test_hostserver PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_hostserver COMMAND test_hostserver)
+lanrdp_add_test(test_hostserver
+    SOURCES tests/test_hostserver.cpp
+    LABELS "net"
+)
 
 # Phase 31：被控端宿主边界（host/HostController）—— 监听 / 会话池快照 / 令牌 / 统计。
 # 这是被控端逻辑从 MainWindow 下沉后的直接落点，从前只能靠 UI 用例间接覆盖。
-add_executable(test_hostcontroller tests/test_hostcontroller.cpp)
-target_link_libraries(test_hostcontroller PRIVATE lanrdp_core Qt6::Test)
+lanrdp_add_test(test_hostcontroller
+    SOURCES tests/test_hostcontroller.cpp
+    LABELS "net;gfx"
+)
 if (WIN32)
     # 响应时长用例要判断环境：桌面物理尺寸（gdi32）与会话是否可交互（user32）
     target_link_libraries(test_hostcontroller PRIVATE gdi32 user32)
 endif()
-add_test(NAME test_hostcontroller COMMAND test_hostcontroller)
 
 # Phase 9⑤ 剪贴板同步：载荷编解码 + 同步器（回环抑制 / 长度上限）
-add_executable(test_clipboard tests/test_clipboard.cpp)
-target_link_libraries(test_clipboard PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_clipboard COMMAND test_clipboard)
+lanrdp_add_test(test_clipboard
+    SOURCES tests/test_clipboard.cpp
+    LABELS "unit"
+)
 
-add_executable(test_clipboardsync tests/test_clipboardsync.cpp)
-target_link_libraries(test_clipboardsync PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_clipboardsync COMMAND test_clipboardsync)
+lanrdp_add_test(test_clipboardsync
+    SOURCES tests/test_clipboardsync.cpp
+    LABELS "unit"
+)
 
 # UI 结构守护（Phase 6/11/17：悬浮操作条 + 右侧画面；三个对话框）
-add_executable(test_mainwindow_ui tests/test_mainwindow_ui.cpp
-    ${LANRDP_UI_SOURCES}
+lanrdp_add_test(test_i18n
+    SOURCES tests/test_i18n.cpp
+    LIBS Qt6::Widgets
+    LABELS "ui"
 )
-target_link_libraries(test_mainwindow_ui PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_mainwindow_ui COMMAND test_mainwindow_ui)
+
+# 英文翻译也要嵌进这个测试 exe：lanrdp 的那份资源只属于主程序，测试目标
+# 拿不到。少了这一步，「英文界面」这条断言根本无从验证 —— 而它恰恰是
+# 最容易在打包环节被漏掉的东西。
+qt_add_resources(test_i18n "i18n"
+    PREFIX "/i18n"
+    BASE "${CMAKE_CURRENT_BINARY_DIR}"
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/lanrdp_en.qm"
+)
+add_dependencies(test_i18n lanrdp)
+
+lanrdp_add_test(test_mainwindow_ui
+    SOURCES tests/test_mainwindow_ui.cpp ${LANRDP_UI_SOURCES}
+    LIBS Qt6::Widgets
+    LABELS "net;ui"
+)
+
+# 同 test_i18n：主程序那份 qm 资源不共享，这个 exe 也要自己带一份，
+# 否则「切换语言后界面真的变了」这条断言在这里跑不出英文。
+qt_add_resources(test_mainwindow_ui "i18n"
+    PREFIX "/i18n"
+    BASE "${CMAKE_CURRENT_BINARY_DIR}"
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/lanrdp_en.qm"
+)
+add_dependencies(test_mainwindow_ui lanrdp)
 
 # Phase 11 / 任务 11.1：日志端口（落盘 + 环形缓冲），不依赖 QWidget
-add_executable(test_logport tests/test_logport.cpp)
-target_link_libraries(test_logport PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_logport COMMAND test_logport)
+lanrdp_add_test(test_logport
+    SOURCES tests/test_logport.cpp
+    LABELS "unit"
+)
 
 # 会话参数落盘（ini + DPAPI）。落盘逻辑最该有断言：它错的时候不报错，
 # 只表现为「明明记住了，下次开程序又是空的」。
-add_executable(test_sessionstore tests/test_sessionstore.cpp)
-target_link_libraries(test_sessionstore PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_sessionstore COMMAND test_sessionstore)
+lanrdp_add_test(test_sessionstore
+    SOURCES tests/test_sessionstore.cpp
+    LABELS "unit"
+)
 
 # 命令行参数解析（app/CliArgs.cpp）。从前这批分支全在 main() 里，
 # 而 main.cpp 带 main() 没法链进测试目标 ⇒ 未知参数 / 缺取值 / 数字非法 / 动作互斥
 # 全都没有断言。⚠️ 不进 lanrdp_core：它属于应用层，core 不该知道 CLI 的形状。
-add_executable(test_cliargs tests/test_cliargs.cpp app/CliArgs.cpp)
-target_link_libraries(test_cliargs PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_cliargs COMMAND test_cliargs)
+lanrdp_add_test(test_cliargs
+    SOURCES tests/test_cliargs.cpp app/CliArgs.cpp
+    LABELS "unit"
+)
+
+# 口令规则与随机生成（PasswordPolicy.h 是唯一判定口，两个对话框与 --host 共用）
+lanrdp_add_test(test_passwordpolicy
+    SOURCES tests/test_passwordpolicy.cpp
+    LABELS "unit"
+)
+
+# 控制端「连不上」的下一步建议（按 socket 错误分类，别让用户对着英文原文发愣）
+lanrdp_add_test(test_connectionhints
+    SOURCES tests/test_connectionhints.cpp
+    LABELS "unit"
+)
+
+# 「连我」卡片列出的地址：虚拟网卡必须被排除（列出来只会让人选错）
+lanrdp_add_test(test_lanaddresses
+    SOURCES tests/test_lanaddresses.cpp common/LanAddresses.cpp
+    LABELS "unit"
+)
 
 # Phase 18：多视窗网格 —— 布局纯函数（1×1 / 1×2 / 左大右两小 / 2×2）
 # + 宿主行为（重排 / 占满 / 选中）。⛔ 不进 lanrdp_core（core 不依赖 Qt Widgets）。
-add_executable(test_viewgrid tests/test_viewgrid.cpp
-    viewer/ViewGrid.cpp
+lanrdp_add_test(test_viewgrid
+    SOURCES tests/test_viewgrid.cpp viewer/ViewGrid.cpp
+    LIBS Qt6::Widgets
+    LABELS "ui"
 )
-target_link_libraries(test_viewgrid PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_viewgrid COMMAND test_viewgrid)
 
 # Phase 19：自适应码率策略纯函数（积压→码率/帧率，降快升慢 + 迟滞）
-add_executable(test_adaptive tests/test_adaptive.cpp)
-target_link_libraries(test_adaptive PRIVATE lanrdp_core Qt6::Test)
-add_test(NAME test_adaptive COMMAND test_adaptive)
+lanrdp_add_test(test_adaptive
+    SOURCES tests/test_adaptive.cpp
+    LABELS "unit"
+)
 
 # 界面外观：深色 palette 的暗度 / 文字对比度 / Fusion 是否真的装上。
 # ⛔ 不进 lanrdp_core（core 不依赖 Qt Widgets）。
 # ⚠️ 它只链 Theme.cpp，不链整个 UI —— 测的是色板与样式表本身，不需要建窗口。
-add_executable(test_theme tests/test_theme.cpp app/Theme.cpp app/Glyph.cpp)
-target_link_libraries(test_theme PRIVATE lanrdp_core Qt6::Test Qt6::Widgets)
-add_test(NAME test_theme COMMAND test_theme)
+lanrdp_add_test(test_theme
+    SOURCES tests/test_theme.cpp ui/Theme.cpp ui/Glyph.cpp
+    LIBS Qt6::Widgets
+    LABELS "ui"
+)
 
 # ---------------------------------------------------------------------------
 # 压测工具（**不是单测**）：一控多解码 + 渲染负载
@@ -425,57 +572,12 @@ get_filename_component(_qt_runtime_dir "${_qt_core_dll}" DIRECTORY)
 get_filename_component(_qt_prefix_dir "${_qt_runtime_dir}" DIRECTORY)
 set(_qt_plugin_dir "${_qt_prefix_dir}/plugins")
 
-# Phase 20 / BUILD-01：需要 Qt 运行时环境的测试（= 上面 add_test 注册的**全部**）。
-# ⚠️ 这个集合必须与 add_test 一一对应。从前靠人手同步，结果漏了
-#    `test_clientconnection` —— 它在这台机器上「碰巧」能跑，在干净机器上会因
-#    找不到 Qt DLL 而失败。下面用 get_property(TESTS) 做**结构性校验**，
-#    以后漏一个就在 configure 阶段直接报错，而不是等到别人机器上才发现。
-set(_lanrdp_qt_tests
-    test_frame
-    test_session
-    test_auth
-    test_handshake
-    test_capture
-    test_screenframe
-    test_streamer
-    test_inputevent
-    test_injector
-    test_keymap
-    test_renderer
-    test_inputmap
-    test_rendererdrop
-    test_h264frame
-    test_colorconvert
-    test_audiochunk
-    test_audiojitter
-    test_screencontrol
-    test_audiostreamer
-    test_audiohw
-    test_h264encoder
-    test_h264decoder
-    test_decoderworker
-    test_clientconnection_h264
-    test_clientconnection
-    test_filetransfer
-    test_filereceiver
-    test_filesender
-    test_filetransfer_e2e
-    test_tokengate
-    test_hostserver
-    test_hostcontroller
-    test_clipboard
-    test_clipboardsync
-    test_mainwindow_ui
-    test_logport
-    test_sessionstore
-    test_cliargs
-    test_viewgrid
-    test_adaptive
-    test_theme
-    test_windowstatus
-    test_traycontroller
-    test_singleinstance
-)
+# Phase 20 / BUILD-01：需要 Qt 运行时环境的测试（= 上面 lanrdp_add_test 注册的全部）。
+# 名单由 lanrdp_add_test 自己累积，不再手写 —— 手写的那份曾漏过
+# `test_clientconnection`，它在本机「碰巧」能跑、在干净机器上因找不到 Qt DLL 而失败。
+# 下面仍做一次结构性校验：绕过 helper 直接写 add_test 的目标会落不进名单，
+# 在 configure 阶段就报错，而不是等到别人机器上才发现。
+get_property(_lanrdp_qt_tests GLOBAL PROPERTY LANRDP_QT_TESTS)
 
 get_property(_lanrdp_registered DIRECTORY PROPERTY TESTS)
 set(_lanrdp_listed   ${_lanrdp_qt_tests})
@@ -484,8 +586,9 @@ list(SORT _lanrdp_listed)
 list(SORT _lanrdp_actual)
 if(NOT "${_lanrdp_listed}" STREQUAL "${_lanrdp_actual}")
     message(FATAL_ERROR
-        "add_test 注册的测试集合与 set_tests_properties 用的列表不一致 —— "
-        "新增测试时请把名字同时加进 _lanrdp_qt_tests，否则它在干净机器上会因找不到 Qt DLL 而失败。\n"
+        "add_test 注册的测试集合与 lanrdp_add_test 累积的名单不一致 —— "
+        "多半是有人绕过 lanrdp_add_test 直接写了 add_test；"
+        "那个目标在干净机器上会因找不到 Qt DLL 而失败。\n"
         "  add_test 注册： ${_lanrdp_actual}\n"
         "  列表里写的：   ${_lanrdp_listed}")
 endif()

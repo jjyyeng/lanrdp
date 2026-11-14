@@ -1,7 +1,7 @@
 #include "host/ScreenStreamer.h"
 
 #include "host/AdaptiveBitrate.h"
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 #include "host/ScreenCapturer.h"
 #include "net/Session.h"
 #include "protocol/Frame.h"

@@ -59,10 +59,26 @@ public:
     HostSession loadHost() const;
     PeerSession loadPeer() const;
 
-    // 返回是否真的写进去了。失败（目录只读 / 磁盘满）由调用方决定怎么提示 ——
+    // 界面语言（键 `ui/language`，取值见 common/I18n.h 的 uiLanguageKey()）。
+    //
+    // 它和 host/peer 那两组不是一类东西：那些是「启动一次会话要填的参数」，
+    // 这个跨会话的用户偏好。放在同一个 ini 里只是为了「一个程序只有一份配置」，
+    // 不必再教用户去第二个位置找。
+    //
+    // 没存过 / 读不到 → 空串，由调用方按「跟随系统」处理。**不返回默认语言的键**：
+    // 「没选过」和「明确选了跟随系统」在语义上是两件事，虽然当前表现一样。
+    QString loadUiLanguage() const;
+    bool saveUiLanguage(const QString &key);
+
+    // 返回是否**完整**写进去了。失败（目录只读 / 磁盘满）由调用方决定怎么提示 ——
     // 这里静默吞掉的话，用户会以为"记住了"，下次开程序发现又空了。
-    bool saveHost(const HostSession &session);
-    bool savePeer(const PeerSession &session);
+    //
+    // `error`（可为空）在返回 false 时填一句能直接给用户看的原因。
+    // ⚠️ **口令加密失败也算失败**：那时其余字段照写，但 ini 里的口令键**保持原样**
+    //（不会被空串盖掉）。从前这条只判 `QSettings::status()`，加密失败写进去一个空
+    // 串照样报成功 —— 用户下次启动发现口令没了，而且没有任何线索。
+    bool saveHost(const HostSession &session, QString *error = nullptr);
+    bool savePeer(const PeerSession &session, QString *error = nullptr);
 
 private:
     QString filePath_;

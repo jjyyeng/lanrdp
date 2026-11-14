@@ -113,6 +113,12 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+
+    // 界面语言切换：两层提示（键鼠已接管 / 点击可操作）的文案是在 paintEvent
+    // 里现取 tr() 的，所以重绘一次就是换语言。idleText_ 与 staleText_ 由上层
+    // 重设（它们带状态，本类不自己编措辞）。
+    void changeEvent(QEvent *event) override;
+
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragLeaveEvent(QDragLeaveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
@@ -140,7 +146,9 @@ private:
     // 当前按下的键 / 鼠标键（记账在 press，销账在 release）。
     // 存在的唯一理由：**打断时要能补发抬起** —— 没有这份集合就补不出来，
     // 远端那个键会永久按下（按住 Ctrl 时远端整机不可用）。
-    QSet<int> pressedKeys_;     // Windows 虚拟键码
+    // ⚠️ 键盘存的是「复合键」（`pressedKeyToken(vk, extended)`），不是裸 vk：
+    // 左右 Ctrl 共用同一个 VK，只按 vk 记会让两个键互相销账。
+    QSet<std::uint32_t> pressedKeys_;
     QSet<int> pressedButtons_;  // Qt::MouseButton
 
     // 最后一次鼠标位置（归一化）。按键 / 滚轮载荷要带上它（注入端不认「当前光标」）。

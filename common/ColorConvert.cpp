@@ -1,4 +1,4 @@
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 
 #include <QVector>
 

@@ -34,7 +34,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 #include "host/H264Encoder.h"
 
 namespace {

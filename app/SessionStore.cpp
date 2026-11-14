@@ -164,36 +164,134 @@ PeerSession SessionStore::loadPeer() const
     return session;
 }
 
-bool SessionStore::saveHost(const HostSession &session)
+QString SessionStore::loadUiLanguage() const
+{
+    if (!isEnabled())
+        return QString();
+
+    const QSettings ini(filePath_, QSettings::IniFormat);
+    return ini.value(QStringLiteral("ui/language")).toString().trimmed();
+}
+
+bool SessionStore::saveUiLanguage(const QString &key)
 {
     if (!isEnabled())
         return false;
     if (!ensureParentDir(filePath_))
         return false;
 
+    // QSettings 写回时会保留同一文件里其他键，所以这里只动 ui/language，
+    // 不会把用户已经存好的端口 / 口令冲掉。
     QSettings ini(filePath_, QSettings::IniFormat);
-    ini.setValue(QStringLiteral("host/port"), session.port);
-    ini.setValue(QStringLiteral("host/password"), protectSecret(session.password));
-    ini.setValue(QStringLiteral("host/receiveDir"), session.receiveDir);
-    ini.setValue(QStringLiteral("host/useH264"), session.useH264);
-    ini.setValue(QStringLiteral("host/bitrateBps"), session.bitrateBps);
+    ini.setValue(QStringLiteral("ui/language"), key);
     ini.sync();
     return ini.status() == QSettings::NoError;
 }
 
-bool SessionStore::savePeer(const PeerSession &session)
+namespace {
+
+// 把口令写进 ini。返回空串 = 成功；非空 = 失败原因（可直接给用户看）。
+//
+// 三种情形必须分开处理：
+// · 空口令 = 用户主动清空 ⇒ 真的把键清掉（否则旧密文一直留在那儿，用户以为没清成功）
+// · 加密失败 ⇒ **一个键都不写**，ini 里保留上一次的密文；绝不能拿空串盖掉 ——
+//   那等于把用户上次存好的口令悄悄抹了，而他连提示都不会有
+// · 正常 ⇒ 写密文
+QString writeSecret(QSettings &ini, const QString &key, const QString &plain)
 {
+    if (plain.isEmpty())
+    {
+        ini.setValue(key, QString());
+        return QString();
+    }
+
+    const QString cipher = protectSecret(plain);
+    if (cipher.isEmpty())
+        return QStringLiteral("口令加密失败，本次未保存口令");
+
+    ini.setValue(key, cipher);
+    return QString();
+}
+
+} // namespace
+
+bool SessionStore::saveHost(const HostSession &session, QString *error)
+{
+    if (error)
+        error->clear();
     if (!isEnabled())
+    {
+        if (error)
+            *error = QStringLiteral("配置持久化已停用");
         return false;
+    }
     if (!ensureParentDir(filePath_))
+    {
+        if (error)
+            *error = QStringLiteral("无法创建配置目录");
         return false;
+    }
+
+    QSettings ini(filePath_, QSettings::IniFormat);
+    ini.setValue(QStringLiteral("host/port"), session.port);
+    const QString secretError =
+        writeSecret(ini, QStringLiteral("host/password"), session.password);
+    ini.setValue(QStringLiteral("host/receiveDir"), session.receiveDir);
+    ini.setValue(QStringLiteral("host/useH264"), session.useH264);
+    ini.setValue(QStringLiteral("host/bitrateBps"), session.bitrateBps);
+    ini.sync();
+    if (ini.status() != QSettings::NoError)
+    {
+        if (error)
+            *error = QStringLiteral("无法写入配置文件");
+        return false;
+    }
+    if (!secretError.isEmpty())
+    {
+        // 其余字段已经落盘了，只是口令那一项没成 —— 原因单独报，别混进 IO 失败里。
+        if (error)
+            *error = secretError;
+        return false;
+    }
+    return true;
+}
+
+bool SessionStore::savePeer(const PeerSession &session, QString *error)
+{
+    if (error)
+        error->clear();
+    if (!isEnabled())
+    {
+        if (error)
+            *error = QStringLiteral("配置持久化已停用");
+        return false;
+    }
+    if (!ensureParentDir(filePath_))
+    {
+        if (error)
+            *error = QStringLiteral("无法创建配置目录");
+        return false;
+    }
 
     QSettings ini(filePath_, QSettings::IniFormat);
     ini.setValue(QStringLiteral("peer/host"), session.host);
     ini.setValue(QStringLiteral("peer/port"), session.port);
-    ini.setValue(QStringLiteral("peer/password"), protectSecret(session.password));
+    const QString secretError =
+        writeSecret(ini, QStringLiteral("peer/password"), session.password);
     ini.sync();
-    return ini.status() == QSettings::NoError;
+    if (ini.status() != QSettings::NoError)
+    {
+        if (error)
+            *error = QStringLiteral("无法写入配置文件");
+        return false;
+    }
+    if (!secretError.isEmpty())
+    {
+        if (error)
+            *error = secretError;
+        return false;
+    }
+    return true;
 }
 
 } // namespace lanrdp

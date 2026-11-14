@@ -20,6 +20,7 @@ Session::Session(QTcpSocket *socket, QObject *parent)
 {
     Q_ASSERT(socket_ != nullptr);
     socket_->setParent(this);
+    createdTimer_.start();
 
     // 关掉 Nagle（TCP_NODELAY）。
     //

@@ -1,5 +1,6 @@
 #include "net/ClientConnection.h"
 
+#include "common/ConnectionHints.h"
 #include "net/Auth.h"
 #include "net/FileSender.h"
 #include "net/Session.h"
@@ -170,7 +171,7 @@ void ClientConnection::connectTo(const QString &host, quint16 port, const QStrin
         // 退避），满员重连在对方空出名额前也不会成功。标记下来让重连判定短路。
         authRejected_      = true;
         emit logMessage(QStringLiteral("对方拒绝了连接：口令不正确或对方连接数已满（已停止自动重连）"));
-        emit statusMessage(QStringLiteral("对方拒绝连接：口令不正确或对方连接数已满"));
+        emit statusMessage(tr("对方拒绝连接：口令不正确或对方连接数已满"));
         emit stateChanged();
         emit handshakeFinished(false, QStringLiteral("denied"));
     });
@@ -193,8 +194,12 @@ void ClientConnection::connectTo(const QString &host, quint16 port, const QStrin
             handshakeReported_ = true;
             ready_             = false;
             const QString error = socket->errorString();
-            emit logMessage(QStringLiteral("连接失败：%1").arg(error));
-            emit statusMessage(QStringLiteral("连接失败"));
+            const QString hint  = connectionHint(socket->error());
+            // 日志留 Qt 原文（排障要看），界面给一句能照着做的话。
+            emit logMessage(hint.isEmpty()
+                                ? QStringLiteral("连接失败：%1").arg(error)
+                                : QStringLiteral("连接失败：%1 —— %2").arg(error, hint));
+            emit statusMessage(hint.isEmpty() ? tr("连接失败") : hint);
             emit stateChanged();
             emit handshakeFinished(false, error);
         }
@@ -204,10 +209,19 @@ void ClientConnection::connectTo(const QString &host, quint16 port, const QStrin
     });
 
     // 对端断开（或把我们踢了）时复位界面，不要停留在「接收中」的假象里。
-    connect(socket, &QTcpSocket::disconnected, this, [this]() { onSocketDisconnected(); });
+    //
+    // 必须判归属，理由与上面的 errorOccurred 同源：teardown() 只是把旧 Session 交给
+    // deleteLater，旧 socket 那时**仍连着**；等它被回收时，QTcpSocket 的析构会
+    // **同步**发一次 disconnected。不判归属的话，这条「上一次连接的临终信号」会把
+    // teardown() 刚建好的**新**连接拆掉 —— 表现为连着时点【重连】画面一闪就断。
+    connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
+        if (!isCurrentSocket(session_, socket))
+            return;
+        onSocketDisconnected();
+    });
 
     emit logMessage(QStringLiteral("正在连接 %1:%2 …").arg(host).arg(port));
-    emit statusMessage(QStringLiteral("连接中…"));
+    emit statusMessage(tr("连接中…"));
 
     socket->connectToHost(host, port);
 }
@@ -277,7 +291,7 @@ void ClientConnection::disconnectNow()
     teardown();
     emit connectionLost();
     if (wasReady)
-        emit statusMessage(QStringLiteral("连接已断开"));
+        emit statusMessage(tr("连接已断开"));
 }
 
 // 【重连】按钮。与「用户重新点一次【新连接…】」的区别只在于参数从哪来 ——
@@ -297,11 +311,17 @@ void ClientConnection::reconnectNow()
 // disconnectNow 走自己的分支（它要额外做优雅关闭与停退避）。
 void ClientConnection::onSocketDisconnected()
 {
+    // 主动断开由 disconnectNow() 自己收口。它调 disconnectFromHost() 时若发送队列
+    // 是空的，Qt 会**同步**发 disconnected —— 不挡这一下，同一次点击里会 teardown
+    // 两遍、connectionLost 发两遍（上层按「一格里断了一次」处理，重复通知没意义）。
+    if (userInitiatedDisconnect_)
+        return;
+
     if (!handshakeReported_ && !ready_) {
         // 还没握手就断了：让命令行 / 界面知道这次连接没成
         handshakeReported_ = true;
         emit logMessage(QStringLiteral("连接已断开"));
-        emit statusMessage(QStringLiteral("连接失败"));
+        emit statusMessage(tr("连接失败"));
         emit handshakeFinished(false, QStringLiteral("disconnected"));
     } else if (ready_) {
         emit logMessage(QStringLiteral("与对方的连接已断开"));
@@ -311,7 +331,7 @@ void ClientConnection::onSocketDisconnected()
     teardown();
     emit connectionLost();
     if (wasReady)
-        emit statusMessage(QStringLiteral("连接已断开"));
+        emit statusMessage(tr("连接已断开"));
 
     // 清理完之后再排重连（用户主动断开会在这里被抑制）
     scheduleReconnect();
@@ -691,7 +711,7 @@ void ClientConnection::onHeartbeatTick()
     teardown();
     emit connectionLost();
     if (wasReady)
-        emit statusMessage(QStringLiteral("连接已断开"));
+        emit statusMessage(tr("连接已断开"));
 
     scheduleReconnect();
 }

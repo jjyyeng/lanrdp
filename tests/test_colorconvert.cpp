@@ -4,7 +4,7 @@
 #include <QImage>
 #include <QVector>
 
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 
 // BGRA -> NV12 色彩转换
 // 采用 BT.601 有限范围（video range）：Y 落在 16..235，Cb/Cr 落在 16..240。

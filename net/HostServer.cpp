@@ -1,10 +1,12 @@
 #include "net/HostServer.h"
 
+#include "common/I18n.h"
 #include "net/Auth.h"
 #include "net/Session.h"
 
 #include <QDateTime>
 #include <QAbstractSocket>
+#include <QCoreApplication>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -39,11 +41,15 @@ QString sourceIpKey(const QHostAddress &address)
 QString listenFailureReason(QTcpServer *server, quint16 port)
 {
     if (server->serverError() == QAbstractSocket::AddressInUseError) {
-        return QStringLiteral("端口 %1 已被占用：另一个程序（或本程序的另一个实例）正在使用它。"
-                              "请换一个端口，或先关掉占用该端口的程序。")
+        return QCoreApplication::translate("lanrdp",
+                   "端口 %1 已被占用：另一个程序（或本程序的另一个实例）正在使用它。"
+                   "请换一个端口，或先关掉占用该端口的程序。")
             .arg(port);
     }
-    return QStringLiteral("监听端口 %1 失败：%2").arg(port).arg(server->errorString());
+    return QCoreApplication::translate("lanrdp",
+               "监听端口 %1 失败：%2")
+        .arg(port)
+        .arg(server->errorString());
 }
 
 // 被退避挡下的连接：回一帧 HANDSHAKE_DENY 后断开。

@@ -6,7 +6,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 
-#include "app/LogPort.h"
+#include "common/LogPort.h"
 
 // 日志端口（LogPort）
 //

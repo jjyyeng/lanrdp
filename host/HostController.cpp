@@ -1,6 +1,6 @@
 #include "host/HostController.h"
 
-#include "app/LogPort.h"
+#include "common/LogPort.h"
 #include "host/AudioCapturer.h"
 #include "host/AudioStreamer.h"
 #include "host/InputInjector.h"
@@ -12,6 +12,7 @@
 #include "protocol/InputEvent.h"
 #include "protocol/ScreenControl.h"
 
+#include <QStringList>
 #include <QTcpSocket>
 #include <QTimer>
 
@@ -38,6 +39,7 @@ QString peerName(const Session *s)
 
 // 毫秒写成人话。整分钟才用「分钟」，否则用「秒」——
 // 这样验收时把超时常量临时改小（如 12 s）日志也不会自相矛盾。
+// ⚠️ 只进日志，不进界面，所以保持中文、不走 tr()。
 QString humanDuration(qint64 ms)
 {
     const qint64 secs = ms / 1000;
@@ -129,7 +131,7 @@ void HostController::ensureAudio()
     // 音频起不来**不影响画面**：只记一行日志 + 状态栏，不弹框、不停流。
     connect(audioCapturer_, &AudioCapturer::failed, this, [this](const QString &reason) {
         emit logLine(QStringLiteral("音频采集不可用（画面不受影响）：%1").arg(reason));
-        emit statusText(QStringLiteral("对方听不到声音：音频采集不可用"));
+        emit statusText(tr("对方听不到声音：音频采集不可用"));
     });
 }
 
@@ -161,7 +163,7 @@ bool HostController::start(quint16 port, const QString &password)
 
         connect(streamer_, &ScreenStreamer::failed, this, [this](const QString &error) {
             emit logLine(QStringLiteral("抓屏失败，已停止推送：%1").arg(error));
-            emit statusText(QStringLiteral("画面采集失败"));
+            emit statusText(tr("画面采集失败"));
             emit captureFailed(error);
         });
 
@@ -169,7 +171,7 @@ bool HostController::start(quint16 port, const QString &password)
         // 这里只做可见性提示，让人知道「不是死了，是在重试」。
         connect(streamer_, &ScreenStreamer::captureInterrupted, this, [this](const QString &reason) {
             emit logLine(QStringLiteral("画面采集中断，正在自动重试：%1").arg(reason));
-            emit statusText(QStringLiteral("画面中断，重试中…"));
+            emit statusText(tr("画面中断，重试中…"));
         });
 
         connect(streamer_, &ScreenStreamer::captureResumed, this, [this]() {
@@ -191,7 +193,7 @@ bool HostController::start(quint16 port, const QString &password)
         connect(streamer_, &ScreenStreamer::targetCongested, this,
                 [this](Session *session, const QString &reason) {
                     emit logLine(QStringLiteral("接收端过慢，已断开该连接：%1").arg(reason));
-                    emit statusText(QStringLiteral("已断开一个网络过慢的控制端"));
+                    emit statusText(tr("已断开一个网络过慢的控制端"));
                     if (session && session->socket())
                         session->socket()->disconnectFromHost();
                 });
@@ -232,34 +234,51 @@ bool HostController::start(quint16 port, const QString &password)
         idleTimer_->start();   // 空闲让出的兜底判定只在监听期间跑
 
     emit logLine(QStringLiteral("正在监听 0.0.0.0:%1").arg(host_->port()));
-    emit statusText(QStringLiteral("监听中：端口 %1").arg(host_->port()));
+    emit statusText(tr("监听中：端口 %1").arg(host_->port()));
     notifyUi();   // 状态变了 —— 让 UI 那份快照立刻跟上
     return true;
 }
 
-// 兜底：我们注入过「按下」、却还没注入过「抬起」时，替对端补一针松开。
+// 兜底：我们注入过「按下」、却还没注入过「抬起」时，替对端补一针松开（鼠标 + 键盘）。
 //
 // 场景：网络正好在按下与抬起之间断掉 / 控制端被踢 / 机主收回输入权 / 停止监听 ——
-// 那一针「抬起」再也送不到，被控端的鼠标键就会一直停在按下态（表现为拖拽不松手）。
-// ⚠️ 这不是靠计时猜：`mouseButtonsDown_` 只在我们**确实注入成功**过按下时才非 0，
-// 且收到抬起就清位 —— 所以正常操作永远不会被误伤。
-void HostController::releaseStuckMouseButtons(const QString &reason)
+// 那一针「抬起」再也送不到，被控端的鼠标键就会一直停在按下态（表现为拖拽不松手），
+// 键盘同理（Shift 卡住则后续输入全大写，Ctrl 卡住则点什么都是组合键）。
+// ⚠️ 这不是靠计时猜：`mouseButtonsDown_` / `keysDown_` 只在我们**确实注入成功**过
+// 按下时才非空，且收到抬起就清掉 —— 所以正常操作永远不会被误伤。
+void HostController::releaseStuckInput(const QString &reason)
 {
-    if (mouseButtonsDown_ == 0)
+    if (mouseButtonsDown_ == 0 && keysDown_.isEmpty())
         return;
 
-    const bool ok = lanrdp::releaseAllMouseButtons();
-    mouseButtonsDown_ = 0;
-    emit logLine(ok ? QStringLiteral("⚠ %1：补发了一针鼠标「抬起」（否则被控端会一直按着不放）")
-                          .arg(reason)
-                    : QStringLiteral("⚠ %1：想补发鼠标「抬起」，但被系统拒绝（目标窗口权限更高？）")
-                          .arg(reason));
+    const bool                   hadMouse = mouseButtonsDown_ != 0;
+    const QSet<std::uint32_t>    keys     = keysDown_;
+    mouseButtonsDown_                    = 0;
+    keysDown_.clear();
+
+    // 鼠标与键盘是两种 INPUT，只能分两次提交；任何一边被拒都算失败。
+    const bool mouseOk = hadMouse ? lanrdp::releaseAllMouseButtons() : true;
+    const bool keysOk  = lanrdp::releaseKeys(keys);
+
+    // 这一段只用来拼日志正文（logLine），保持中文、不进翻译表。
+    QStringList what;
+    if (hadMouse)
+        what << QStringLiteral("鼠标");
+    if (!keys.isEmpty())
+        what << QStringLiteral("%1 个按键").arg(keys.size());
+    const QString detail = what.join(QStringLiteral(" 与 "));
+
+    emit logLine((mouseOk && keysOk)
+                     ? QStringLiteral("⚠ %1：补发了 %2 的「抬起」（否则被控端会一直按着不放）")
+                           .arg(reason, detail)
+                     : QStringLiteral("⚠ %1：想补发 %2 的「抬起」，但被系统拒绝（目标窗口权限更高？）")
+                           .arg(reason, detail));
 }
 
 void HostController::stop()
 {
     // 先补掉悬空的按下：停监听之后，对端就算想送「抬起」也没路了。
-    releaseStuckMouseButtons(QStringLiteral("停止监听"));
+    releaseStuckInput(QStringLiteral("停止监听"));
 
     // 音频采集线程必须**在摘会话之前**停：它的块要经 Session 发出去，
     // 会话正在被销毁时往里面写就是踩悬空指针。`stopAndWait` 有界（循环最长阻塞 50 ms）。
@@ -303,7 +322,7 @@ void HostController::stop()
     host_ = nullptr;
 
     emit logLine(QStringLiteral("已停止监听（断开 %1 个控制端）").arg(sessions.size()));
-    emit statusText(QStringLiteral("已停止监听"));
+    emit statusText(tr("已停止监听"));
     notifyUi();
 }
 
@@ -324,7 +343,12 @@ quint16 HostController::port() const
 void HostController::handleAuthenticated(Session *session)
 {
     const QString peer = peerName(session);
-    emit logLine(QStringLiteral("控制端已通过鉴权：%1").arg(peer));
+    // 带上会话号与握手耗时：排障时最常被问「到底连上没有、等了多久」。
+    // 会话号是单调 id（不是指针），日志里的 #N 可以跨整份日志对得上。
+    emit logLine(QStringLiteral("控制端已通过鉴权：%1（会话 #%2，握手 %3 ms）")
+                     .arg(peer)
+                     .arg(session ? session->id() : 0)
+                     .arg(session ? session->ageMs() : 0));
 
     // ---- 远端文件 -> 落盘 ----
     ensureFileReceiver();
@@ -375,7 +399,7 @@ void HostController::handleAuthenticated(Session *session)
     broadcastScreenList();
 
     notifyUi();
-    emit statusText(QStringLiteral("控制端已连接，正在推送画面"));
+    emit statusText(tr("控制端已连接，正在推送画面"));
 }
 
 void HostController::handleRejected(Session *session)
@@ -389,10 +413,10 @@ void HostController::handleRejected(Session *session)
     const int max   = host_ ? host_->maxClients() : 0;
     if (host_ && count >= max) {
         emit logLine(QStringLiteral("有连接被拒绝：控制端数量已达上限（%1）").arg(max));
-        emit statusText(QStringLiteral("已拒绝：控制端已满"));
+        emit statusText(tr("已拒绝：控制端已满"));
     } else {
         emit logLine(QStringLiteral("有连接因口令错误被拒绝 (DENY)"));
-        emit statusText(QStringLiteral("已拒绝：口令错误"));
+        emit statusText(tr("已拒绝：口令错误"));
     }
 }
 
@@ -404,7 +428,7 @@ void HostController::handleDisconnected(Session *session)
     if (session && tokenGate_.holds(tokenOf(session))) {
         tokenGate_.remove(tokenOf(session));
         // 它的「抬起」再也送不到了 —— 有悬空的按下就补一针松开。
-        releaseStuckMouseButtons(QStringLiteral("操作权持有者断开"));
+        releaseStuckInput(QStringLiteral("操作权持有者断开"));
         emit logLine(QStringLiteral("操作权持有者断开，操作权已释放"));
     }
     // 身份表也必须同步清掉：留着的话，新会话若落在同一地址会查到旧 id。
@@ -428,11 +452,11 @@ void HostController::handleDisconnected(Session *session)
         streamer_->removeTarget(session);
         if (streamer_->targetCount() == 0) {
             streamer_->stop();
-            emit statusText(QStringLiteral("控制端已断开，暂停推送"));
+            emit statusText(tr("控制端已断开，暂停推送"));
             return;
         }
     }
-    emit statusText(QStringLiteral("控制端已断开"));
+    emit statusText(tr("控制端已断开"));
 }
 
 void HostController::handleSessionFrame(Session *session, const Frame &frame)
@@ -472,7 +496,7 @@ void HostController::handleSessionFrame(Session *session, const Frame &frame)
     if (frame.type == static_cast<std::uint8_t>(FrameType::TokenRelease)) {
         tokenGate_.release(tokenOf(session));
         // 令牌交出去了，后续按键不再从这条连接来 —— 悬空的按下要就地补掉。
-        releaseStuckMouseButtons(QStringLiteral("控制端让出操作权"));
+        releaseStuckInput(QStringLiteral("控制端让出操作权"));
         emit logLine(QStringLiteral("控制端让出了操作权：%1").arg(peerName(session)));
         notifyUi();
         return;
@@ -520,8 +544,10 @@ void HostController::handleSessionFrame(Session *session, const Frame &frame)
     const bool ok = lanrdp::injectEvent(*input, targetMonitorRect(), virtualDesktopRect());
 
     if (ok) {
-        // 只记**注入成功**的鼠标按键：没进系统的那一针，系统那边本来就没按下，不用我们去松。
+        // 只记**注入成功**的按下：没进系统的那一针，系统那边本来就没按下，不用我们去松。
+        // 键盘与鼠标各记一份 —— 断线时两者都要补（见 releaseStuckInput）。
         mouseButtonsDown_ = lanrdp::updatePressedMask(mouseButtonsDown_, *input);
+        keysDown_         = lanrdp::updatePressedKeys(keysDown_, *input);
         ++injectedCount_;
         emit inputInjected(static_cast<int>(input->kind));
     } else {
@@ -625,7 +651,7 @@ void HostController::takeInput()
     Session *holder = holderSession();
     tokenGate_.release(tokenOf(holder));
     // 收回时对方可能正按着鼠标 —— 补一针松开，别把被控端卡在按下态。
-    releaseStuckMouseButtons(QStringLiteral("收回操作权"));
+    releaseStuckInput(QStringLiteral("收回操作权"));
     if (holder)
         holder->sendFrame(static_cast<std::uint8_t>(FrameType::TokenRelease));
 
@@ -633,7 +659,7 @@ void HostController::takeInput()
         emit logLine(QStringLiteral("已收回操作权并锁定（原持有者：%1）").arg(peerName(holder)));
     else
         emit logLine(QStringLiteral("已锁定（当前没有控制端持有操作权）"));
-    emit statusText(QStringLiteral("已锁定：控制端暂时无法操作本机"));
+    emit statusText(tr("已锁定：控制端暂时无法操作本机"));
 
     notifyUi();
 }
@@ -642,7 +668,7 @@ void HostController::unlockInput()
 {
     tokenGate_.unlock();
     emit logLine(QStringLiteral("已恢复，控制端可以再次申请操作本机"));
-    emit statusText(QStringLiteral("已恢复：控制端可以重新申请操作"));
+    emit statusText(tr("已恢复：控制端可以重新申请操作"));
     notifyUi();
 }
 
@@ -657,7 +683,7 @@ void HostController::announceIdleRelease(TokenGate::Token expired)
         idle->sendFrame(static_cast<std::uint8_t>(FrameType::TokenRelease));
 
     // 人走了但可能还按着鼠标（最后一条事件是「按下」）—— 补一针松开。
-    releaseStuckMouseButtons(QStringLiteral("空闲自动让出操作权"));
+    releaseStuckInput(QStringLiteral("空闲自动让出操作权"));
 
     emit logLine(QStringLiteral("控制端 %1 已空闲 %2（纯鼠标移动不算操作），自动让出操作权")
                      .arg(idle ? peerName(idle) : QStringLiteral("（已断开）"),
@@ -820,6 +846,7 @@ QString HostController::audioInfo() const
     if (!audio_ || !audio_->hasFormat())
         return QString();
     const AudioFormat format = audio_->format();
+    // 只用于日志的格式描述，不走翻译。
     return QStringLiteral("%1 Hz / %2 声道").arg(format.sampleRate).arg(format.channels);
 }
 
@@ -909,7 +936,7 @@ void HostController::applyScreenSelect(quint8 index)
                                  .arg(index + 1)
                                  .arg(screens.at(index).width)
                                  .arg(screens.at(index).height));
-                emit statusText(QStringLiteral("已切换画面来源：第 %1 块屏").arg(index + 1));
+                emit statusText(tr("已切换画面来源：第 %1 块屏").arg(index + 1));
             }
         }
     }

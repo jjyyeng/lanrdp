@@ -1,5 +1,7 @@
 #include "app/WindowStatus.h"
 
+#include <QCoreApplication>
+
 namespace lanrdp {
 
 QString baseWindowTitle()
@@ -34,23 +36,30 @@ int hostBadgeCount(bool listening, int clientCount)
     return clientCount;
 }
 
+// ⚠️ 这里是自由函数，没有 QObject 上下文，只能走 QCoreApplication::translate；
+// 而且**每个字面量都要直接写进 translate() 里** —— 用辅助函数转发（text(src)）
+// 会让 lupdate 抽不到这几条，英文界面下它们会静默留在中文。
 QString hostWindowTitle(bool listening, int clientCount, const QString &firstPeer)
 {
     if (!listening)
         return baseWindowTitle();
 
     if (clientCount <= 0)
-        return QStringLiteral("%1 — 等待连接").arg(baseWindowTitle());
+        return QCoreApplication::translate("lanrdp", "%1 — 等待连接").arg(baseWindowTitle());
 
     if (clientCount == 1) {
         // 只有一个连接时点名道姓，比「1 个连接」有用得多；拿不到地址就退回泛称。
         const QString who = peerAddress(firstPeer);
         return who.isEmpty()
-                   ? QStringLiteral("%1 — 正在被对方控制").arg(baseWindowTitle())
-                   : QStringLiteral("%1 — 正在被 %2 控制").arg(baseWindowTitle(), who);
+                   ? QCoreApplication::translate("lanrdp", "%1 — 正在被对方控制")
+                         .arg(baseWindowTitle())
+                   : QCoreApplication::translate("lanrdp", "%1 — 正在被 %2 控制")
+                         .arg(baseWindowTitle(), who);
     }
 
-    return QStringLiteral("%1 — %2 个连接正在查看本机").arg(baseWindowTitle()).arg(clientCount);
+    return QCoreApplication::translate("lanrdp", "%1 — %2 个连接正在查看本机")
+        .arg(baseWindowTitle())
+        .arg(clientCount);
 }
 
 bool hideToTrayOnMinimize(bool trayResident, bool trayVisible, bool minimized)

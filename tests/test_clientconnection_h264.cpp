@@ -11,7 +11,7 @@
 
 #include <functional>
 
-#include "host/ColorConvert.h"
+#include "common/ColorConvert.h"
 #include "host/H264Encoder.h"
 #include "net/ClientConnection.h"
 #include "net/HostServer.h"

@@ -1,4 +1,4 @@
-#include "host/MfRuntime.h"
+#include "common/MfRuntime.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
