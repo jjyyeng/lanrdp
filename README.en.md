@@ -30,6 +30,8 @@ external services, no installer.
   notification area and sharing continues
 - **Single instance** (optional, off by default): launching again focuses the existing window
   instead of opening a second one
+- **UI in Chinese or English**: *Settings → Language* offers 中文 / English / Follow system, and the
+  switch applies immediately (no restart)
 - Dark UI; `windeployqt` turns the build into a portable folder that runs without a Qt installation
 
 ## Getting it
