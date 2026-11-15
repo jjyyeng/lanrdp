@@ -235,6 +235,11 @@ void TrayController::refreshTexts()
     refreshIcon();
 }
 
+void TrayController::applyTheme()
+{
+    refreshIcon();   // 图标没建出来时它自己空转，不必在这里判断
+}
+
 void TrayController::refreshIcon()
 {
     if (!icon_)

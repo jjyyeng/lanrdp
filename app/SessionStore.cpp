@@ -188,6 +188,82 @@ bool SessionStore::saveUiLanguage(const QString &key)
     return ini.status() == QSettings::NoError;
 }
 
+// 界面外观（深色 / 浅色）。与语言同规矩：跨会话的用户偏好，不是「启动一次会话的
+// 参数」。没存过 → 空串，由调用方按默认（深色）处理 —— 不在这里返回默认键，
+// 免得「没选过」和「明确选了深色」从此分不出来。
+QString SessionStore::loadUiTheme() const
+{
+    if (!isEnabled())
+        return QString();
+
+    const QSettings ini(filePath_, QSettings::IniFormat);
+    return ini.value(QStringLiteral("ui/theme")).toString().trimmed();
+}
+
+bool SessionStore::saveUiTheme(const QString &key)
+{
+    if (!isEnabled())
+        return false;
+    if (!ensureParentDir(filePath_))
+        return false;
+
+    QSettings ini(filePath_, QSettings::IniFormat);
+    ini.setValue(QStringLiteral("ui/theme"), key);
+    ini.sync();
+    return ini.status() == QSettings::NoError;
+}
+
+QString appAutoReconnectKey()
+{
+    return QStringLiteral("app/autoReconnect");
+}
+
+QString appReceiveAudioKey()
+{
+    return QStringLiteral("app/receiveAudio");
+}
+
+QString appTrayResidentKey()
+{
+    return QStringLiteral("app/trayResident");
+}
+
+QString appSingleInstanceKey()
+{
+    return QStringLiteral("app/singleInstance");
+}
+
+// 三态读。`nullopt` = 这个键**从没存过**（首次运行，或是升级前的老 ini）。
+//
+// `contains()` 是唯一能把「没存过」与「存了 false」分开的判据：`value(key).toBool()`
+// 在两种情况下都返回 false，混起来用就再也回不到默认值 —— 而首启套默认正是本次
+// 要的行为。值的两种写法（`true/false`、`1/0`）都认，手工改过 ini 也不会读歪。
+std::optional<bool> SessionStore::loadAppSwitch(const QString &key) const
+{
+    if (!isEnabled() || key.isEmpty())
+        return std::nullopt;
+
+    const QSettings ini(filePath_, QSettings::IniFormat);
+    if (!ini.contains(key))
+        return std::nullopt;
+    return ini.value(key).toBool();
+}
+
+bool SessionStore::saveAppSwitch(const QString &key, bool value)
+{
+    if (!isEnabled() || key.isEmpty())
+        return false;
+    if (!ensureParentDir(filePath_))
+        return false;
+
+    // 与语言 / 主题同规矩：QSettings 写回保留同一文件里的其他键，
+    // 所以勾一下托盘不会把用户存好的端口、口令或主题冲掉。
+    QSettings ini(filePath_, QSettings::IniFormat);
+    ini.setValue(key, value);
+    ini.sync();
+    return ini.status() == QSettings::NoError;
+}
+
 namespace {
 
 // 把口令写进 ini。返回空串 = 成功；非空 = 失败原因（可直接给用户看）。

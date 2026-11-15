@@ -40,6 +40,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QApplication>
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QDir>
@@ -174,6 +175,18 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         peerHost_     = peer.host;
         peerPort_     = peer.port;
         peerPassword_ = peer.password;
+
+        // 四项行为偏好。没存过（首启 / 老版本 ini）就保持成员自己的默认值 ——
+        // 这正是三态读取的用处：「没存过」不能与「明确关掉了」混为一谈。
+        // 只读进成员，平台动作留给下面 tray_ 建好之后（构造后半段）。
+        if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appAutoReconnectKey()))
+            autoReconnectOn_ = *on;
+        if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appReceiveAudioKey()))
+            audioEnabled_ = *on;
+        if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appTrayResidentKey()))
+            trayResident_ = *on;
+        if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appSingleInstanceKey()))
+            singleInstance_ = *on;
     }
 
     // 界面语言必须在 buildUi() **之前**装好 —— 之后创建的每个控件都是按当时的
@@ -187,6 +200,19 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
                                             ? lanrdp::UiLanguage::System
                                             : lanrdp::currentUiLanguage();
     lanrdp::setUiLanguage(lanrdp::uiLanguageFromKey(sessionStore_.loadUiLanguage(), fallback));
+
+    // 界面外观也是「建窗口之前就要定下来」的东西，理由与语言同一条：窗口一创建
+    // 就按当前 palette 定标题栏与子控件的底色，之后再换会闪一下。
+    //
+    // 没存过 ⇒ 深色（沿用既有外观）。⚠️ **不能持久化时（测试 / 程序化嵌入）一律
+    // 不动全局主题** —— 跟语言那条是同一个道理：没有配置可读，就不该擅自改
+    // 别人的全局状态；否则每条用例都会把开发机选的浅色 / 深色重置一遍。
+    if (sessionStore_.isEnabled()) {
+        lanrdp::theme::setMode(lanrdp::theme::modeFromKey(sessionStore_.loadUiTheme(),
+                                                          lanrdp::theme::Mode::Dark));
+        if (auto *app = qobject_cast<QApplication *>(QCoreApplication::instance()))
+            lanrdp::theme::apply(*app);
+    }
 
     // 控制端连接**不再在这里建** —— 它现在属于某一格（RemoteView）。
     // 第 0 格（本机预览格）在 buildUi() 里建好，且**没有连接**：只有真的要连一台
@@ -214,6 +240,16 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     connect(tray_.get(), &lanrdp::TrayController::quitRequested, this, []() {
         QCoreApplication::quit();
     });
+
+    // 上次存过「开」的，这里把平台动作真的做出来（托盘图标要等 tray_ 建好，
+    // 所以只能放在这个位置）。单实例的 listen 也走同一条路径，让「开关 → 生效点」
+    // 只有一份实现。
+    // ⚠️ 漏了这一段，菜单会显示「已勾选」而实际什么都没做：成员是 true，图标没挂、
+    // 命名管道没听 —— 编译通过、界面正常、功能静默失效。
+    if (trayResident_)
+        applyTrayResident(true);
+    if (singleInstance_)
+        applySingleInstance(true);
 
     // ---- 音频播放（对方的声音）----
     // 单实例：只有选中格那一格出声。**构造时不碰任何设备** —— 第一次 `begin()`
@@ -1056,25 +1092,49 @@ void MainWindow::buildViewMenu()
     openSettingsAction_ = settingsMenu_->addAction(tr("设置…"));
     openSettingsAction_->setObjectName(QStringLiteral("actionOpenSettings"));
     openSettingsAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
-    openSettingsAction_->setStatusTip(tr("断线自动重连 / 远程键鼠总开关"));
+    openSettingsAction_->setStatusTip(tr("连接、窗口与控制选项"));
     connect(openSettingsAction_, &QAction::triggered, this, &MainWindow::openSettingsDialog);
 
-    // 音频：**全局偏好**，所以入口只能在这里（与另两项同规矩，悬浮条上不挂）。
-    // 默认开 —— 默认关会造成「明明连着却听不见」的困惑，而听不听是随时可关的。
-    audioAction_ = settingsMenu_->addAction(tr("接收对方的声音"));
-    audioAction_->setObjectName(QStringLiteral("actionReceiveAudio"));
-    audioAction_->setCheckable(true);
-    audioAction_->setChecked(audioEnabled_);
-    audioAction_->setStatusTip(
-        tr("听到对方电脑的系统声音（一控多时只播当前选中那一格）"));
-    connect(audioAction_, &QAction::toggled, this, [this](bool on) {
-        audioEnabled_ = on;
-        applyAudioRouting();
-        setStatusText(on ? tr("已开启对方的声音")
-                         : tr("已关闭对方的声音"));
+    // 音频、自动重连、托盘、单实例这四项**只放在【设置…】对话框里**（见
+    // openSettingsDialog）。同一个状态有两处可编辑，就必然有一处忘记同步；
+    // 而且「哪几项会被记住」也只有在同一张对话框里才讲得清。
+    // 菜单里只留「打开设置」与两个纯外观偏好（外观 / 语言）—— 它们改的是界面本身，
+    // 值得一键可达。
+
+    // ---- 界面外观 ----
+    // 和语言并列、同一套做法：两个互斥的可勾选项，点一下当场生效并落盘。
+    // 刻意**不**放进【设置…】对话框 —— 那个对话框是「行为开关」的清单，
+    // 塞进外观会让人以为主题也跟某个连接有关。
+    settingsMenu_->addSeparator();   // 上面是设置入口，下面是外观类偏好
+
+    appearanceMenu_ = settingsMenu_->addMenu(tr("外观"));
+    appearanceMenu_->setObjectName(QStringLiteral("menuAppearance"));
+
+    auto *themeGroup = new QActionGroup(this);
+    themeGroup->setExclusive(true);
+
+    auto addThemeAction = [this, themeGroup](const QString &text, lanrdp::theme::Mode mode,
+                                             const QString &objectName) {
+        QAction *action = appearanceMenu_->addAction(text);
+        action->setObjectName(objectName);
+        action->setCheckable(true);
+        action->setData(static_cast<int>(mode));
+        themeGroup->addAction(action);
+        return action;
+    };
+
+    themeDarkAction_  = addThemeAction(tr("深色"), lanrdp::theme::Mode::Dark,
+                                       QStringLiteral("actionThemeDark"));
+    themeLightAction_ = addThemeAction(tr("浅色"), lanrdp::theme::Mode::Light,
+                                       QStringLiteral("actionThemeLight"));
+    themeDarkAction_->setStatusTip(tr("深色外观：暗底浅字，适合长时间盯画面"));
+    themeLightAction_->setStatusTip(tr("浅色外观：亮底深字，适合白天或明亮的房间"));
+
+    connect(themeGroup, &QActionGroup::triggered, this, [this](QAction *action) {
+        applyUiTheme(lanrdp::theme::Mode(action->data().toInt()));
     });
 
-    settingsMenu_->addSeparator();
+    refreshThemeMenu();
 
     // ---- 界面语言 ----
     // 两种语言各自用**自己的文字**写（中文 / English），不跟着界面语言翻 ——
@@ -1150,6 +1210,63 @@ void MainWindow::applyUiLanguage(lanrdp::UiLanguage lang)
         sessionStore_.saveUiLanguage(lanrdp::uiLanguageKey(lang));
 }
 
+void MainWindow::refreshThemeMenu()
+{
+    if (!appearanceMenu_)
+        return;
+
+    appearanceMenu_->setTitle(tr("外观"));
+
+    const lanrdp::theme::Mode current = lanrdp::theme::mode();
+    if (themeDarkAction_) {
+        themeDarkAction_->setText(tr("深色"));
+        themeDarkAction_->setStatusTip(tr("深色外观：暗底浅字，适合长时间盯画面"));
+        themeDarkAction_->setChecked(current == lanrdp::theme::Mode::Dark);
+    }
+    if (themeLightAction_) {
+        themeLightAction_->setText(tr("浅色"));
+        themeLightAction_->setStatusTip(tr("浅色外观：亮底深字，适合白天或明亮的房间"));
+        themeLightAction_->setChecked(current == lanrdp::theme::Mode::Light);
+    }
+}
+
+// 换主题。三件事缺一不可：
+//  ① 换色板并重新装到应用上（palette + 全局 QSS + 标题栏配色）—— 控件自己的
+//    监听（菜单栏、状态栏、输入框、对话框）到此就全对了；
+//  ② **逐格重建图标**，并重装条与空态层那两份私有 QSS。QIcon 里的颜色是烘死的，
+//    QSS 也只认自己那份 —— 不重建就会出现「窗口是浅色的、条上还是一片深色图标」。
+//  ③ 托盘图标同理（它是位图，不是 QIcon 引擎画的）。
+//
+// 不重启、不重建窗口：切主题是即时动作，用户没有理由为此关掉正在看的画面。
+void MainWindow::applyUiTheme(lanrdp::theme::Mode mode)
+{
+    // 无条件重装：不做「模式没变就跳过」的短路 —— 主题是**进程级**状态，别处
+    // （另一个窗口、测试、将来的跟随系统）可能已经把它改掉了，这里以用户这一下
+    // 的选择为准。重装 palette 与 QSS 不重建样式对象，代价可以忽略。
+    lanrdp::theme::setMode(mode);
+    if (auto *app = qobject_cast<QApplication *>(QCoreApplication::instance()))
+        lanrdp::theme::apply(*app);
+
+    // 已存在的格全部重刷 —— 可能是 1 格，也可能是 4 格，还可能此刻一格连接都没有。
+    for (lanrdp::RemoteView *view : std::as_const(views_)) {
+        if (view)
+            view->applyTheme();
+    }
+
+    if (tray_)
+        tray_->applyTheme();
+
+    refreshThemeMenu();
+
+    // 与语言一样落盘（用户的选择，不代表「本次运行」）。写失败不打断操作 ——
+    // 主题已经换好了，下次启动回到深色顶多是再点一次。
+    if (sessionStore_.isEnabled())
+        sessionStore_.saveUiTheme(lanrdp::theme::modeKey(mode));
+
+    log(mode == lanrdp::theme::Mode::Light ? QStringLiteral("已切换到浅色外观")
+                                          : QStringLiteral("已切换到深色外观"));
+}
+
 // 语言切换后的整批重设。
 //
 // Qt 会把 QEvent::LanguageChange 发给每个 QWidget，控件自己的 changeEvent 处理
@@ -1172,16 +1289,13 @@ void MainWindow::retranslateUi()
     }
     if (openSettingsAction_) {
         openSettingsAction_->setText(tr("设置…"));
-        openSettingsAction_->setStatusTip(tr("断线自动重连 / 远程键鼠总开关"));
-    }
-    if (audioAction_) {
-        audioAction_->setText(tr("接收对方的声音"));
-        audioAction_->setStatusTip(tr("听到对方电脑的系统声音（一控多时只播当前选中那一格）"));
+        openSettingsAction_->setStatusTip(tr("连接、窗口与控制选项"));
     }
 
     // 两个双态项的措辞随状态走，交给它按当前状态重写（别在这里再抄一份）。
     refreshHostMenu();
     refreshLanguageMenu();
+    refreshThemeMenu();   // 子菜单标题与两项文案（勾选态顺带刷，无害）
 
     if (recvProgress_) {
         recvProgress_->setToolTip(tr("正在接收对方发送的文件。\n"
@@ -1336,6 +1450,19 @@ void MainWindow::applySingleInstance(bool on)
     }
 }
 
+// 勾一下就落盘。写失败只记日志 —— 开关当场已经生效，为一个「没记住」弹框打断
+// 用户不值当；但不留痕的话，下次启动「怎么又变回去了」就成了没法查的悬案。
+void MainWindow::persistAppSwitch(const QString &key, bool on)
+{
+    if (!sessionStore_.isEnabled())
+        return;
+
+    if (!sessionStore_.saveAppSwitch(key, on)) {
+        log(QStringLiteral("⚠ 开关未能保存（%1，键 %2）：下次启动会回到上一次的值。")
+                .arg(sessionStore_.filePath(), key));
+    }
+}
+
 namespace {
 
 // 把窗口夺到前台。
@@ -1374,6 +1501,22 @@ void MainWindow::bringToFront()
     raise();
     activateWindow();
     forceForeground(winId());
+
+    // 最后一道兜底：确实抢不到前台时，至少让任务栏按钮闪一下。
+    //
+    // 还有几种情况连 AttachThreadInput 也救不了 —— 窗口在**另一个会话**、或者在
+    // 另一个虚拟桌面（切桌面不是 activateWindow 的职责）。那种时候用户看到的就是
+    // 「双击了没反应」，然后以为程序死了。闪一下不解决可达性，但能说明「它在这儿」。
+    // FLASHW_TIMERNOFG：一直闪到窗口真的到前台为止，不会闪两下就停。
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd || ::GetForegroundWindow() == hwnd)
+        return;
+
+    FLASHWINFO flash{};
+    flash.cbSize  = sizeof(flash);
+    flash.hwnd    = hwnd;
+    flash.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+    ::FlashWindowEx(&flash);
 }
 
 // 把「显示预算」下发给每一格连接的解码器。
@@ -1771,29 +1914,45 @@ void MainWindow::openConnectDialog()
 void MainWindow::openSettingsDialog()
 {
     lanrdp::SettingsDialog::Config cfg;
-    cfg.autoReconnect   = autoReconnectEnabled();
-    cfg.inputEnabled    = inputEnabled_;
-    cfg.trayResident    = trayResident_;
-    cfg.singleInstance  = singleInstance_;
+    cfg.autoReconnect  = autoReconnectOn_;
+    cfg.receiveAudio   = audioEnabled_;
+    cfg.trayResident   = trayResident_;
+    cfg.singleInstance = singleInstance_;
+    cfg.inputEnabled   = inputEnabled_;
 
     lanrdp::SettingsDialog dlg(cfg, this);
     if (dlg.exec() != QDialog::Accepted)
         return;
 
-    const auto picked = dlg.config();
+    applySettings(dlg.config());
+}
 
-    // 远程键鼠总开关：与原复选框 toggled 是同一条路径（全局状态 + 注入给每条连接）。
+// 把对话框里的结果落到运行状态并落盘（对话框与程序化入口共用这一条路径）。
+//
+// 逐项比较再动手：已经一致的项不必重做 —— 重挂托盘图标、重听命名管道、重建音频
+// 路由都有可见副作用。落盘同理，只写**用户真正改过**的项，其余保持 ini 原样。
+void MainWindow::applySettings(const lanrdp::SettingsDialog::Config &picked)
+{
+    // 键鼠控制不落盘：每次启动都要重新同意（它是把本机操作发到别人机器上的能力）。
     if (picked.inputEnabled != inputEnabled_)
         setInputEnabledForTest(picked.inputEnabled);
 
-    if (picked.autoReconnect != autoReconnectEnabled())
+    if (picked.autoReconnect != autoReconnectOn_) {
         onAutoReconnectToggled(picked.autoReconnect);
-
-    if (picked.trayResident != trayResident_)
+        persistAppSwitch(lanrdp::appAutoReconnectKey(), picked.autoReconnect);
+    }
+    if (picked.receiveAudio != audioEnabled_) {
+        setReceiveAudioEnabled(picked.receiveAudio);
+        persistAppSwitch(lanrdp::appReceiveAudioKey(), picked.receiveAudio);
+    }
+    if (picked.trayResident != trayResident_) {
         applyTrayResident(picked.trayResident);
-
-    if (picked.singleInstance != singleInstance_)
+        persistAppSwitch(lanrdp::appTrayResidentKey(), picked.trayResident);
+    }
+    if (picked.singleInstance != singleInstance_) {
         applySingleInstance(picked.singleInstance);
+        persistAppSwitch(lanrdp::appSingleInstanceKey(), picked.singleInstance);
+    }
 }
 
 // 把「启用远程键鼠控制」总开关注入到**每一格**（连接 + 渲染器）。
@@ -2673,6 +2832,19 @@ bool MainWindow::reconnectPending() const
 void MainWindow::setAutoReconnectEnabled(bool on)
 {
     onAutoReconnectToggled(on);
+}
+
+// 开 / 关「接收对方声音」。走的是与对话框同一条路：改成员 → 重算路由 → 报一句状态。
+// 关掉时路由会被收回，立即静音；打开时不主动 begin()，等下一格真的在播时再起线程。
+void MainWindow::setReceiveAudioEnabled(bool on)
+{
+    if (audioEnabled_ == on)
+        return;
+    audioEnabled_ = on;
+    applyAudioRouting();
+    setStatusText(on ? tr("已开启对方的声音") : tr("已关闭对方的声音"));
+    log(on ? QStringLiteral("已开启接收对方的声音")
+           : QStringLiteral("已关闭接收对方的声音"));
 }
 
 void MainWindow::onAutoReconnectToggled(bool on)

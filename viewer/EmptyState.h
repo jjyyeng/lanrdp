@@ -29,6 +29,13 @@ public:
     void setHostListening(bool listening);
     bool isHostListening() const { return hostListening_; }
 
+    // 换了主题：重装本层 QSS，并按新色板重画图标。
+    //
+    // 这里的图标是**位图 + QIcon**，颜色在创建时就被烘进去了 —— 与 QSS 不同，
+    // 换主题不会让它们自己变。所以必须逐个重建，否则浅色主题上会留着一颗
+    // 深色主题的灰白大图标（在浅底上几乎看不见）。
+    void applyTheme();
+
 signals:
     // 用户想操作对方 / 想让对方连进来。由 `MainWindow` 接到对应的对话框。
     void connectRequested();

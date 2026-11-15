@@ -69,16 +69,12 @@ EmptyState::EmptyState(QWidget *parent)
     connectButton_ = new QPushButton(this);
     connectButton_->setObjectName(QStringLiteral("emptyPrimary"));
     connectButton_->setCursor(Qt::PointingHandCursor);
-    // 图标颜色跟文字走：主按钮的文字是 onAccent，次按钮是 textSecondary。
-    // 两个图标都指向屏幕 —— 一个箭头朝外（我去连别人），一个朝内（别人连进来）。
-    connectButton_->setIcon(glyph::icon(glyph::Shape::MonitorOut, theme::colors().onAccent));
     connectButton_->setIconSize(QSize(kButtonIcon, kButtonIcon));
     connect(connectButton_, &QPushButton::clicked, this, &EmptyState::connectRequested);
 
     hostButton_ = new QPushButton(this);
     hostButton_->setObjectName(QStringLiteral("emptySecondary"));
     hostButton_->setCursor(Qt::PointingHandCursor);
-    hostButton_->setIcon(glyph::icon(glyph::Shape::MonitorIn, theme::colors().textSecondary));
     hostButton_->setIconSize(QSize(kButtonIcon, kButtonIcon));
     connect(hostButton_, &QPushButton::clicked, this, &EmptyState::hostRequested);
 
@@ -90,7 +86,9 @@ EmptyState::EmptyState(QWidget *parent)
 
     root->addStretch(1);
 
-    setStyleSheet(theme::emptyStateStyleSheet());
+    // 样式与三张图标（中央大图 + 两个入口）都在这里落地 —— 它们全都依赖当前色板，
+    // 所以只有一份代码，换主题时重跑同一个函数即可。
+    applyTheme();
 
     if (parent) {
         parent->installEventFilter(this);
@@ -99,6 +97,19 @@ EmptyState::EmptyState(QWidget *parent)
 
     retranslate();   // 全部文案的唯一来源（构造与语言切换各走一次）
     hide();   // 显隐由 MainWindow 按模式统一刷
+}
+
+void EmptyState::applyTheme()
+{
+    setStyleSheet(theme::emptyStateStyleSheet());
+
+    // 图标颜色跟文字走：主按钮的文字是 onAccent，次按钮是 textSecondary。
+    // 两个图标都指向屏幕 —— 一个箭头朝外（我去连别人），一个朝内（别人连进来）。
+    if (connectButton_)
+        connectButton_->setIcon(glyph::icon(glyph::Shape::MonitorOut, theme::colors().onAccent));
+
+    updateIcon();
+    applyHostButton();   // 它自己也带图形（允许 / 禁止），颜色同样取自当前色板
 }
 
 // 这一屏没有随状态变化的长文案，只有「按钮该说允许还是禁止」那一处，
@@ -161,7 +172,7 @@ void EmptyState::updateIcon()
 bool EmptyState::event(QEvent *event)
 {
     // 跨缩放比拖动窗口（100% ↔ 150% 很常见）：构造时那张位图是按旧 DPR 栅格化的，
-    // 不重画就会糊成一团 —— 这是唯一需要重画图标的时机。
+    // 不重画就会糊成一团。换主题时同理 —— 颜色换过之后这张位图还是旧色板。
     if (event->type() == QEvent::DevicePixelRatioChange)
         updateIcon();
     else if (event->type() == QEvent::LanguageChange)

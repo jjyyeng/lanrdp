@@ -1,9 +1,17 @@
 #include "app/SingleInstance.h"
 
+#include "protocol/Frame.h"
+
 #include <QLocalServer>
 #include <QLocalSocket>
 
 namespace lanrdp {
+
+QString singleInstanceKey()
+{
+    // 见头文件里的说明：带协议版本，新旧两份才不会被对方吞掉。
+    return QStringLiteral("lanrdp-instance-v1-p%1").arg(int(kVersion));
+}
 
 SingleInstanceGuard::SingleInstanceGuard(QObject *parent) : QObject(parent) {}
 

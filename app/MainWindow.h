@@ -4,6 +4,7 @@
 #include "common/I18n.h"
 #include "common/LogPort.h"
 #include "app/SessionStore.h"
+#include "ui/Theme.h"
 // 值成员要用到 `HostController::UiState`（宿主状态的本地快照），所以这里必须见到完整定义。
 #include "host/HostController.h"
 #include "protocol/InputEvent.h"
@@ -133,6 +134,18 @@ public:
     // setReceiveDir 同类的自测 / 单测入口。
     void setAutoReconnectEnabled(bool on);
 
+    // 【设置…】里「接收对方声音」的可观测状态与程序化开关（同上，UI 唯一编辑处是对话框）。
+    bool receiveAudioEnabled() const { return audioEnabled_; }
+    void setReceiveAudioEnabled(bool on);
+
+    // 托盘常驻 / 单实例的当前值（同类查询，界面与测试都用它判断）。
+    bool trayResidentEnabled() const { return trayResident_; }
+    bool singleInstanceEnabled() const { return singleInstance_; }
+
+    // 把一份【设置…】结果整体应用（当场生效 + 落盘）。对话框点【确定】走的就是它，
+    // 自测与单测也用它 —— 免得测试去弹模态框。
+    void applySettings(const lanrdp::SettingsDialog::Config &picked);
+
     // 日志端口（测试与程序内部读日志的唯一入口）。
     // 界面上的日志区已按需求删除，日志改为落盘 txt；端口是内存缓冲 + 文件的收口。
     const lanrdp::LogPort *logPort() const { return logPort_.get(); }
@@ -258,12 +271,25 @@ private:
     void refreshLanguageMenu();
     // 用户点了某种语言：装翻译器 → 落盘 → 失败时说明原因。
     void applyUiLanguage(lanrdp::UiLanguage lang);
+
+    // ---- 界面外观 ----
+    // 勾选态按当前主题刷（与语言那条同规矩：勾的是「用户选的那一套」）。
+    void refreshThemeMenu();
+    // 用户点了深色 / 浅色：换色板 → 重新装到应用上 → **逐格重建图标** →
+    // 托盘图标重画 → 落盘。当场生效，不需要重启。
+    void applyUiTheme(lanrdp::theme::Mode mode);
     // 界面语言变了：把那些「设过一次就不再改」的文案整批重设一遍。
     //
     // 为什么不能只靠 Qt 自动派发的 QEvent::LanguageChange：那个事件只到 QWidget。
     // 菜单栏、QAction、托盘菜单、窗口标题、状态栏文本都不是靠 changeEvent 刷的，
     // 得在这里显式重来一遍。
     void retranslateUi();
+
+    // ---- 三项跨会话行为偏好 ----
+    // 勾一下就落盘。失败只写日志：这些开关当场已经生效了，没必要为「没记住」
+    // 弹一个对话框打断用户；但日志里必须留痕，否则下次启动「怎么又变回去了」
+    // 就成了悬案。
+    void persistAppSwitch(const QString &key, bool on);
 
     // 把一格条上的控件接到本窗口（每格只接一次）。
     void wireView(lanrdp::RemoteView *view);
@@ -456,9 +482,9 @@ private:
     // 所以不必每格一个播放器（每格一个会各自抢一块设备，反而要自己做混音）。
     // 子对象随本窗口析构；`~MainWindow` 里先 `stopAndWait()` 收线程。
     lanrdp::AudioPlayer *audioPlayer_ = nullptr;
-    // 【设置 → 接收对方的声音】的当前值（只对本次运行生效，与另两个全局偏好同规矩）。
+    // 【设置…】里「接收对方声音」的当前值。跨会话记住（`app/receiveAudio`）——
+    // 与自动重连 / 托盘 / 单实例同规矩。
     bool    audioEnabled_ = true;
-    QAction *audioAction_ = nullptr;
     // 上一次体检的计数（只在**变化**时写日志，避免正常播放也刷屏）。
     quint64 audioStarvedSeen_  = 0;
     qsizetype audioDroppedSeen_ = 0;
@@ -515,9 +541,12 @@ private:
     QMenu   *viewMenu_         = nullptr;
     QMenu   *settingsMenu_     = nullptr;
     QMenu   *languageMenu_     = nullptr;
+    QMenu   *appearanceMenu_   = nullptr;     // 【设置 → 外观】深色 / 浅色
     QAction *toggleBarAction_    = nullptr;   // 【视图】悬浮操作条
     QAction *openSettingsAction_ = nullptr;   // 【设置】设置…
     QAction *langSystemAction_ = nullptr;     // 【设置 → 语言】跟随系统
     QAction *langZhAction_     = nullptr;     // 中文
     QAction *langEnAction_     = nullptr;     // English
+    QAction *themeDarkAction_  = nullptr;     // 【设置 → 外观】深色
+    QAction *themeLightAction_ = nullptr;     // 浅色
 };

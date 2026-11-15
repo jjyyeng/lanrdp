@@ -62,6 +62,12 @@ public:
     // 托盘菜单是 QMenu + QAction，收不到 QEvent::LanguageChange（它不是控件）。
     void refreshTexts();
 
+    // 换了主题：按当前色板重画图标。
+    //
+    // 托盘图标是位图，颜色在生成时就定了。不重画的话，浅色主题下通知区域里
+    // 还挂着一枚深色主题的浅色显示器 —— 在浅色任务栏上基本看不见。
+    void applyTheme();
+
 signals:
     void restoreRequested();      // 双击图标，或菜单【显示主窗口】
     void stopSharingRequested();  // 菜单【停止共享】

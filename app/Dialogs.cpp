@@ -401,41 +401,55 @@ void ConnectDialog::accept()
 // 【设置…】
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// 一个选项 = 复选框 + 紧跟一行灰字说明。
+//
+// 说明不塞进 tooltip：设置项的解释应当一眼可见，而不是等鼠标悬停才出现；
+// 也不写长句 —— 一行放得下才会被读。
+void addOption(QVBoxLayout *box, QCheckBox *check, const QString &hint, QWidget *parent)
+{
+    auto *item = new QVBoxLayout;
+    item->setContentsMargins(18, 0, 0, 6);   // 与复选框文字左对齐
+    item->setSpacing(1);
+    item->addWidget(check);
+
+    auto *label = new QLabel(hint, parent);
+    label->setObjectName(QStringLiteral("formHint"));
+    label->setWordWrap(true);
+    item->addWidget(label);
+
+    box->addLayout(item);
+}
+
+} // namespace
+
 SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("设置"));
+    // 与另两个对话框同宽：换成最长的说明时不会挤成两行，来回切换也不会跳。
+    setMinimumWidth(kDialogMinWidth);
 
     autoReconnect_ = new QCheckBox(tr("断线自动重连"), this);
     autoReconnect_->setObjectName(QStringLiteral("autoReconnectCheck"));
     autoReconnect_->setChecked(initial.autoReconnect);
-    autoReconnect_->setToolTip(tr(
-        "连接意外断开后自动重试，重连间隔从 1 秒逐步延长至 30 秒。\n"
-        "点击【断开】或取消勾选后不再重连。"));
 
-    input_ = new QCheckBox(tr("启用远程键鼠控制"), this);
-    input_->setObjectName(QStringLiteral("inputCheck"));
-    input_->setChecked(initial.inputEnabled);
-    input_->setToolTip(tr(
-        "开启后，本机的鼠标与键盘操作将发送至对方电脑。\n"
-        "需先点击画面取得焦点，键盘操作方可生效。\n"
-        "关闭后，本机操作不影响对方。"));
+    audio_ = new QCheckBox(tr("接收对方声音"), this);
+    audio_->setObjectName(QStringLiteral("audioCheck"));
+    audio_->setChecked(initial.receiveAudio);
 
-    tray_ = new QCheckBox(tr("最小化时收进通知区域"), this);
+    tray_ = new QCheckBox(tr("最小化到托盘"), this);
     tray_->setObjectName(QStringLiteral("trayResidentCheck"));
     tray_->setChecked(initial.trayResident);
-    tray_->setToolTip(tr(
-        "开启后，最小化窗口会收进屏幕右下角的通知区域，任务栏上不再占位置。\n"
-        "双击通知区域的图标即可恢复窗口；右键图标可停止共享或退出程序。\n"
-        "收进通知区域期间，程序仍在后台运行。"));
 
-    singleInstance_ = new QCheckBox(tr("只允许运行一个程序窗口"), this);
+    singleInstance_ = new QCheckBox(tr("同时只开一个窗口"), this);
     singleInstance_->setObjectName(QStringLiteral("singleInstanceCheck"));
     singleInstance_->setChecked(initial.singleInstance);
-    singleInstance_->setToolTip(tr(
-        "开启后，再次启动程序不会开出第二个窗口，而是把已有的这个叫到前台。\n"
-        "适合常驻后台共享时防止误开多个程序。\n"
-        "命令行方式（脚本自测）不受此限制。"));
+
+    input_ = new QCheckBox(tr("键鼠控制"), this);
+    input_->setObjectName(QStringLiteral("inputCheck"));
+    input_->setChecked(initial.inputEnabled);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("确定"));
@@ -443,27 +457,30 @@ SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    auto *hint = new QLabel(tr(
-        "以上设置仅本次运行有效，退出程序后不保留。"), this);
-    hint->setObjectName(QStringLiteral("formHint"));
-    hint->setWordWrap(true);
+    // 只有「不记住」的那一项需要额外交代；其余四项不必逐条说，底部一句带过。
+    auto *footnote = new QLabel(tr("以上设置会自动保存，键鼠控制除外。"), this);
+    footnote->setObjectName(QStringLiteral("formFootnote"));
+    footnote->setWordWrap(true);
 
     auto *box = new QVBoxLayout(this);
-    box->addWidget(autoReconnect_);
-    box->addWidget(input_);
-    box->addWidget(tray_);
-    box->addWidget(singleInstance_);
-    box->addWidget(hint);
+    addOption(box, autoReconnect_, tr("断开后按 1–30 秒递增间隔重试"), this);
+    addOption(box, audio_, tr("只播当前选中画面的声音"), this);
+    addOption(box, tray_, tr("收进通知区域，程序继续运行"), this);
+    addOption(box, singleInstance_, tr("重复启动时叫回已有窗口"), this);
+    addOption(box, input_, tr("关闭后只能看，不能操作对方"), this);
+    box->addSpacing(4);
+    box->addWidget(footnote);
     box->addWidget(buttons);
 }
 
 SettingsDialog::Config SettingsDialog::config() const
 {
     Config c;
-    c.autoReconnect   = autoReconnect_->isChecked();
-    c.inputEnabled    = input_->isChecked();
-    c.trayResident    = tray_->isChecked();
-    c.singleInstance  = singleInstance_->isChecked();
+    c.autoReconnect  = autoReconnect_->isChecked();
+    c.receiveAudio   = audio_->isChecked();
+    c.trayResident   = tray_->isChecked();
+    c.singleInstance = singleInstance_->isChecked();
+    c.inputEnabled   = input_->isChecked();
     return c;
 }
 

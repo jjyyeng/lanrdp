@@ -101,7 +101,6 @@ void RemoteView::buildUi()
     clientListButton_ = newBarButton(bar_, QStringLiteral("0"), QStringLiteral("clientListButton"));
     clientListButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     clientListButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    clientListButton_->setIcon(glyph::icon(glyph::Shape::Person, theme::colors().textPrimary));
     clientListButton_->setEnabled(false);
     clientListButton_->setVisible(false);   // 未监听时隐藏，由 MainWindow 按监听状态刷
     row->addWidget(clientListButton_);
@@ -109,7 +108,6 @@ void RemoteView::buildUi()
     maximizeButton_ = newBarButton(bar_, QString(), QStringLiteral("maximizeButton"));
     maximizeButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     maximizeButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    refreshMaximizeButton();
     row->addWidget(maximizeButton_);
 
     // 操作权状态：一颗**不可点**的图标（点它没有任何动作，所以不设 hover 反馈，
@@ -119,13 +117,11 @@ void RemoteView::buildUi()
     tokenStatusButton_ = newBarButton(bar_, QString(), QStringLiteral("tokenStatusButton"));
     tokenStatusButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     tokenStatusButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    refreshTokenStatus();
     row->addWidget(tokenStatusButton_);
 
     releaseTokenButton_ = newBarButton(bar_, QString(), QStringLiteral("releaseTokenButton"));
     releaseTokenButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     releaseTokenButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    releaseTokenButton_->setIcon(glyph::icon(glyph::Shape::Unlock, theme::colors().textPrimary));
     releaseTokenButton_->setEnabled(false);   // 手上没有操作权时无从让出
     row->addWidget(releaseTokenButton_);
 
@@ -135,21 +131,17 @@ void RemoteView::buildUi()
     screenButton_ = newBarButton(bar_, QString(), QStringLiteral("screenButton"));
     screenButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     screenButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    screenButton_->setIcon(glyph::icon(glyph::Shape::Monitor, theme::colors().textPrimary));
     screenButton_->setVisible(false);
     row->addWidget(screenButton_);
 
     sendFileButton_ = newBarButton(bar_, QString(), QStringLiteral("sendFileButton"));
     sendFileButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     sendFileButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    sendFileButton_->setIcon(glyph::icon(glyph::Shape::SendFile, theme::colors().textPrimary));
     row->addWidget(sendFileButton_);
 
     disconnectButton_ = newBarButton(bar_, QString(), QStringLiteral("disconnectButton"));
     disconnectButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     disconnectButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    // 危险动作用告警色 —— 文字按钮时靠样式表的 color，换成图标后颜色得落在图形上。
-    disconnectButton_->setIcon(glyph::icon(glyph::Shape::Disconnect, theme::colors().danger));
     disconnectButton_->setEnabled(false);
     row->addWidget(disconnectButton_);
 
@@ -158,20 +150,21 @@ void RemoteView::buildUi()
     retryButton_ = newBarButton(bar_, QString(), QStringLiteral("retryButton"));
     retryButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     retryButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    retryButton_->setIcon(glyph::icon(glyph::Shape::Reconnect, theme::colors().textPrimary));
     row->addWidget(retryButton_);
 
     closeCellButton_ = newBarButton(bar_, QString(), QStringLiteral("closeCellButton"));
     closeCellButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     closeCellButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    closeCellButton_->setIcon(glyph::icon(glyph::Shape::CloseCell, theme::colors().textPrimary));
     row->addWidget(closeCellButton_);
 
     connectButton_ = newBarButton(bar_, QString(), QStringLiteral("connectButton"));
     connectButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     connectButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
-    connectButton_->setIcon(glyph::icon(glyph::Shape::NewConnection, theme::colors().textPrimary));
     row->addWidget(connectButton_);
+
+    // 条内样式与全部图标（含按状态取色那两颗）在这里落地 —— 它们都依赖当前色板，
+    // 所以只有一份代码；换主题时重跑同一个函数。
+    applyTheme();
 
     // ---- 「点这一格 = 选中这一格」----
     // 过滤器装在画面控件与条上：它们的点击才算「操作这一格」。
@@ -179,6 +172,45 @@ void RemoteView::buildUi()
     // 那是好事 —— 按钮各自知道该作用于哪一格，本来就不需要先切选中。
     renderer_->installEventFilter(this);
     bar_->installEventFilter(this);
+}
+
+// 条上按钮的图形颜色一律取自当前色板，而且**没有一处写死**：
+// 换主题就是要让这一整批重画一遍（QIcon 里的颜色是烘死的，不会跟着 QSS 变）。
+// 【断开】是危险动作用告警色 —— 它是图标按钮，颜色只能落在图形上（QSS 的 color
+// 管不到 QIcon），所以这一处也必须在重建名单里。
+void RemoteView::applyTheme()
+{
+    if (bar_)
+        bar_->applyTheme();
+
+    if (emptyState_)
+        emptyState_->applyTheme();
+
+    const theme::Colors &c = theme::colors();
+
+    if (clientListButton_)
+        clientListButton_->setIcon(glyph::icon(glyph::Shape::Person, c.textPrimary));
+    if (releaseTokenButton_)
+        releaseTokenButton_->setIcon(glyph::icon(glyph::Shape::Unlock, c.textPrimary));
+    if (screenButton_)
+        screenButton_->setIcon(glyph::icon(glyph::Shape::Monitor, c.textPrimary));
+    if (sendFileButton_)
+        sendFileButton_->setIcon(glyph::icon(glyph::Shape::SendFile, c.textPrimary));
+    if (disconnectButton_)
+        disconnectButton_->setIcon(glyph::icon(glyph::Shape::Disconnect, c.danger));
+    if (retryButton_)
+        retryButton_->setIcon(glyph::icon(glyph::Shape::Reconnect, c.textPrimary));
+    if (closeCellButton_)
+        closeCellButton_->setIcon(glyph::icon(glyph::Shape::CloseCell, c.textPrimary));
+    if (connectButton_)
+        connectButton_->setIcon(glyph::icon(glyph::Shape::NewConnection, c.textPrimary));
+
+    // 这两颗的图形随状态走，各自的重建函数里已经取了色板。
+    refreshMaximizeButton();
+    refreshTokenStatus();
+
+    if (renderer_)
+        renderer_->update();   // 画面底与叠字是自绘的
 }
 
 // 条上除「已连 N 个」外全是**纯图标**：说明只存在于悬停提示与无障碍名字里。

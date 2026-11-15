@@ -8,10 +8,13 @@ class QLocalServer;
 namespace lanrdp {
 
 // 本程序的单实例监听名。探测与监听共用一个出处，两处写两份早晚会漂移。
-inline QString singleInstanceKey()
-{
-    return QStringLiteral("lanrdp-instance-v1");
-}
+//
+// ⚠️ 名字里必须带**协议版本**。同机放着新旧两份程序是常态（旧 `dist` 备份、
+// 拷来的另一份），名字若写死，双击新版会被旧版吞掉 —— 而版本不一致的后果是
+// 「能动但点不动」，是最难自诊的一类故障。用协议版本而不是项目版本号，是因为
+// 后者长期停在 0.1.0（等于没带），而协议版本真的会变；且「协议相同」才意味着
+// 两份真的可以互相拦。
+QString singleInstanceKey();
 
 // 「只允许运行一个实例」的协调器（可选，默认关）。
 //

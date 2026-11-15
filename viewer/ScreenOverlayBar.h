@@ -73,6 +73,12 @@ public:
     // 右侧动作区。调用方自行 addWidget —— 条不预设任何按钮。
     QHBoxLayout *actionLayout() const { return actions_; }
 
+    // 换了主题：重装条内样式并重绘。
+    //
+    // 条自己带一份 QSS（条高 30，用不了全局那套 padding），换主题时它不会
+    // 自动跟着变 —— 不重装的话，浅色主题下端上来一条深色条。
+    void applyTheme();
+
 signals:
     // 双击条（标题区）= 占满 / 还原这一格。
     // 只发信号、不认识「占满」这件事 —— 布局归 ViewGrid / 窗口，条不该知道它。

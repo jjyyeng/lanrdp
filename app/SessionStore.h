@@ -2,13 +2,15 @@
 
 #include <QString>
 
+#include <optional>
+
 namespace lanrdp {
 
-// 会话启动参数的落盘。
+// 会话启动参数与跨会话偏好的落盘。
 //
-// 落盘的是**启动一次会话要填的那几个字段**（端口 / 口令 / 地址 / 接收目录 / 编码），
-// 目的是「下次打开程序不用重填」。⚠️ 【设置…】里那两个开关**不在其中**：它们是
-// 本次运行的临时偏好，跨会话保留反而会让「我明明关掉过」变成悬案。
+// 一类是**启动一次会话要填的那几个字段**（端口 / 口令 / 地址 / 接收目录 / 编码），
+// 目的是「下次打开程序不用重填」；另一类是界面语言、外观与四项行为开关
+// （自动重连 / 接收声音 / 托盘 / 单实例），目的是「用户的选择不被重启抹掉」。
 //
 // 口令**不以明文落盘**：写之前过 Windows DPAPI（`CryptProtectData`），与当前
 // Windows 用户绑定。要说实话 —— 它抬高的门槛只是「要解出来，得像这个用户一样
@@ -42,6 +44,13 @@ QString defaultSessionFilePath();
 QString protectSecret(const QString &plain);
 QString unprotectSecret(const QString &stored);
 
+// 四项行为开关的键名。**只在这里定义一次** —— 写错一个字符的症状是「设了但没生效」，
+// 编译期抓不到，因此不允许调用方各自字面量拼一遍。
+QString appAutoReconnectKey();
+QString appReceiveAudioKey();
+QString appTrayResidentKey();
+QString appSingleInstanceKey();
+
 // ini 的读写。
 //
 // `filePath` 为空 = **停用**：读写全部不落盘、不访问文件系统。MainWindow 的默认
@@ -69,6 +78,26 @@ public:
     // 「没选过」和「明确选了跟随系统」在语义上是两件事，虽然当前表现一样。
     QString loadUiLanguage() const;
     bool saveUiLanguage(const QString &key);
+
+    // 界面外观（键 `ui/theme`，取值见 ui/Theme.h 的 modeKey()：dark / light）。
+    //
+    // 与语言同一类：跨会话的用户偏好，所以放在同一个 ini 里。没存过 → 空串，
+    // 由调用方按默认（深色）处理 —— 同样不返回默认键，「没选过」与「选了深色」
+    // 在语义上是两件事。
+    QString loadUiTheme() const;
+    bool saveUiTheme(const QString &key);
+
+    // ---- 四项行为开关（跨会话偏好，键见下面的 appXxxKey()）----
+    //
+    // 从前它们只活在本次运行里，理由是「跨会话保留会让『我明明关掉过』变成悬案」。
+    // 那条理由只说对了一半：不保留同样是一种悬案 —— 「我明明开过，重启又回到关了」。
+    // 记住用户的选择，两种悬案都不会发生。
+    //
+    // 首启（这四项都没存过）仍是各自的默认值：托盘、单实例默认关，
+    // 自动重连与接收声音默认开。三态读取就是为了这件事 —— 「没存过」必须与
+    // 「明确关掉了」分得开，否则用户永远回不到默认，程序也永远不知道该不该套默认值。
+    std::optional<bool> loadAppSwitch(const QString &key) const;
+    bool saveAppSwitch(const QString &key, bool value);
 
     // 返回是否**完整**写进去了。失败（目录只读 / 磁盘满）由调用方决定怎么提示 ——
     // 这里静默吞掉的话，用户会以为"记住了"，下次开程序发现又空了。

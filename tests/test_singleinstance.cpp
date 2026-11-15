@@ -8,6 +8,8 @@
 
 #include "app/SingleInstance.h"
 
+#include "protocol/Frame.h"
+
 #include <QSignalSpy>
 #include <QTest>
 
@@ -34,6 +36,8 @@ private slots:
     void nameIsReusableAfterDestroy();
     void stopReleasesTheName();
     void repeatedListenLeavesOnePipeline();
+    // 名字必须带协议版本，否则新旧两份程序会互相吞掉
+    void keyCarriesProtocolVersion();
 };
 
 void TestSingleInstance::listenSucceeds()
@@ -114,6 +118,25 @@ void TestSingleInstance::repeatedListenLeavesOnePipeline()
     guard.stop();
     QVERIFY2(!SingleInstanceGuard::notifyRunning(key),
              "stop() 之后名字必须真的放掉 —— 这里漏了说明还有一条管道在听");
+}
+
+// 名字里必须带**协议版本**。
+//
+// 同机放着新旧两份程序是常态（旧 dist 备份、从别人那拷来的一份）。名字若写死，
+// 双击新版会被旧版吞掉 —— 而版本不一致的症状是「能动但点不动」，属于最难自诊
+// 的一类故障。所以这条断言不是形式主义：它守住的是「两份不同协议的程序不会
+// 把对方当成自己」。
+void TestSingleInstance::keyCarriesProtocolVersion()
+{
+    const QString key = lanrdp::singleInstanceKey();
+
+    QVERIFY2(!key.isEmpty(), "监听名不能为空");
+    QVERIFY2(key.contains(QStringLiteral("lanrdp")), qPrintable(key));
+    QVERIFY2(key.contains(QString::number(int(lanrdp::kVersion))),
+             qPrintable(QStringLiteral("名字里看不出协议版本：%1").arg(key)));
+
+    // 同一个构建里必须稳定：探测与监听各算一次，飘了就等于「自己拦不住自己」。
+    QCOMPARE(lanrdp::singleInstanceKey(), key);
 }
 
 QTEST_MAIN(TestSingleInstance)

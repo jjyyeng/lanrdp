@@ -12,12 +12,14 @@
 
 // 界面外观的守护测试。
 //
-// 这一层测不了「好不好看」—— 那没法断言。能断言的是三件事：
-//   ① 主题确实是深色（浅底 + 浅字在长时间盯画面之后刺眼，4K 屏上还会让窗口边缘泛光）；
+// 这一层测不了「好不好看」—— 那没法断言。能断言的是四件事：
+//   ① 两套主题各自方向正确（深色是暗底浅字、浅色是亮底深字）；
 //   ② 每一对「文字 / 底色」的对比度达到 WCAG AA 的 4.5:1 —— 凭肉眼调色，
-//      迟早会调出一处看不清的；
+//      迟早会调出一处看不清的；**两套色板都要验**，只验深色等于放过新加的那套；
 //   ③ apply() 真的把样式换成了 Fusion —— 否则 palette 在 Windows 原生样式下
-//      有一半控件不认（菜单、下拉箭头、微调按钮仍走系统画法），深色化只做了一半。
+//      有一半控件不认（菜单、下拉箭头、微调按钮仍走系统画法），主题只做了一半；
+//   ④ 切换主题时色板、palette 与 QSS **一起**换，而样式对象不重建（重建会让
+//      控件全部重新 polish）。
 namespace {
 
 // WCAG 2.1 相对亮度：sRGB 分量先线性化，再按 0.2126 / 0.7152 / 0.0722 加权。
@@ -49,10 +51,15 @@ class TestTheme : public QObject
     Q_OBJECT
 
 private slots:
-    void paletteIsDark();
+    // 每条用例从一个确定的主题开始：主题是**进程级**状态，上一条若停在浅色，
+    // 后面按深色取的断言就会集体失效（而且失败信息看起来像配色算错了）。
+    void init();
+
+    void palettesPointTheRightWay();
     void textSurvivesOnEverySurface();
     void mutedTextIsStillLegibleWhenDisabled();
     void applyInstallsFusionAndPalette();
+    void switchingModeSwapsEverythingButTheStyle();
     void styleSheetsUseThePalette();
 
     // 矢量图标：任何尺寸 / 任何 DPI 都要出图，而且图上得真有墨
@@ -71,64 +78,103 @@ private slots:
     void eyeOnOffDiffer();
 };
 
-// 底色全部落在暗部、文字全部落在亮部 —— 这是「深色主题」最低限度的定义。
-// 阈值取的是相对亮度而不是「看着像深色」：人眼对 0.05 与 0.10 的区别不可靠。
-void TestTheme::paletteIsDark()
+void TestTheme::init()
 {
-    const auto &c = lanrdp::theme::colors();
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Dark);
+    lanrdp::theme::apply(*qApp);
+}
 
+// 「深色」与「浅色」各有最低限度的定义：底色落在暗部 / 亮部，正文落在另一端。
+// 阈值取的是相对亮度而不是「看着像深色」：人眼对 0.05 与 0.10 的区别不可靠。
+// 负数 = 该方向不设限（深色不验下限、浅色不验上限）。
+void TestTheme::palettesPointTheRightWay()
+{
     const struct {
-        const char *name;
-        QColor      color;
-        double      limit;   // 相对亮度上限
-    } darkSurfaces[] = {
-        {"窗口底 windowBg", c.windowBg, 0.10},
-        {"控件面 surface", c.surface, 0.10},
-        {"画面底 canvas", c.canvas, 0.05},
-        {"悬浮条 overlayBar", c.overlayBar, 0.10},
-        {"选中条 overlayBarSelected", c.overlayBarSelected, 0.12},
+        lanrdp::theme::Mode mode;
+        const char         *name;
+        double              surfaceMin;   // 底色亮度必须**高于**它
+        double              surfaceMax;   // 底色亮度必须**低于**它
+        double              textMin;      // 正文亮度必须高于它
+        double              textMax;      // 正文亮度必须低于它
+    } modes[] = {
+        {lanrdp::theme::Mode::Dark,  "深色", -1.0, 0.10, 0.60, -1.0},
+        {lanrdp::theme::Mode::Light, "浅色", 0.70, -1.0, -1.0, 0.20},
     };
 
-    for (const auto &s : darkSurfaces) {
-        QVERIFY2(relativeLuminance(s.color) < s.limit,
-                 qPrintable(QStringLiteral("%1 = %2 的相对亮度 %3 未低于 %4，撑不起「深色」")
-                                .arg(QString::fromUtf8(s.name), describe(s.color))
-                                .arg(relativeLuminance(s.color), 0, 'f', 4)
-                                .arg(s.limit)));
-    }
+    for (const auto &m : modes) {
+        const auto &c = lanrdp::theme::colorsFor(m.mode);
+        const QString modeName = QString::fromUtf8(m.name);
 
-    QVERIFY2(relativeLuminance(c.textPrimary) > 0.60,
-             qPrintable(QStringLiteral("正文色 %1 太暗，压在深底上看不清").arg(describe(c.textPrimary))));
+        const struct {
+            const char *name;
+            QColor      color;
+        } surfaces[] = {
+            {"窗口底 windowBg", c.windowBg},
+            {"控件面 surface", c.surface},
+            {"画面底 canvas", c.canvas},
+            {"悬浮条 overlayBar", c.overlayBar},
+            {"选中条 overlayBarSelected", c.overlayBarSelected},
+        };
+
+        for (const auto &s : surfaces) {
+            const double lum  = relativeLuminance(s.color);
+            const QString what = QStringLiteral("%1主题：%2 = %3 的相对亮度 %4")
+                                     .arg(modeName, QString::fromUtf8(s.name), describe(s.color))
+                                     .arg(lum, 0, 'f', 4);
+            if (m.surfaceMax >= 0.0)
+                QVERIFY2(lum < m.surfaceMax, qPrintable(what + QStringLiteral(" 未低于%1").arg(m.surfaceMax)));
+            if (m.surfaceMin >= 0.0)
+                QVERIFY2(lum > m.surfaceMin, qPrintable(what + QStringLiteral(" 未高于%1").arg(m.surfaceMin)));
+        }
+
+        const double textLum = relativeLuminance(c.textPrimary);
+        const QString what    = QStringLiteral("%1主题：正文色 %2 的相对亮度 %3")
+                                 .arg(modeName, describe(c.textPrimary))
+                                 .arg(textLum, 0, 'f', 4);
+        if (m.textMin >= 0.0)
+            QVERIFY2(textLum > m.textMin, qPrintable(what + QStringLiteral(" 太暗，压不住底色")));
+        if (m.textMax >= 0.0)
+            QVERIFY2(textLum < m.textMax, qPrintable(what + QStringLiteral(" 太亮，和底色混成一片")));
+    }
 }
 
 // 文字与底色的组合是穷举的 —— 少列一对，就等于给那一处留了个看不见的漏洞。
+// **两套色板都跑一遍**：新加的那套最容易在「只在浅底上出现」的组合上翻车。
 void TestTheme::textSurvivesOnEverySurface()
 {
-    const auto &c = lanrdp::theme::colors();
+    const char *modeNames[] = {"深色", "浅色"};
+    int         round = 0;
 
-    const struct {
-        const char *where;
-        QColor      bg;
-        QColor      fg;
-    } pairs[] = {
-        {"正文 / 窗口底", c.windowBg, c.textPrimary},
-        {"说明文字 / 窗口底", c.windowBg, c.textSecondary},
-        {"正文 / 控件面", c.surface, c.textPrimary},
-        {"说明文字 / 控件面", c.surface, c.textSecondary},
-        {"正文 / 悬浮条", c.overlayBar, c.textPrimary},
-        {"说明文字 / 悬浮条", c.overlayBar, c.textSecondary},
-        {"正文 / 选中条", c.overlayBarSelected, c.textPrimary},
-        {"按钮文字 / 主按钮底", c.accent, c.onAccent},
-        {"危险动作 / 悬浮条", c.overlayBar, c.danger},
-        {"正文 / 按下态底", c.surfaceActive, c.textPrimary},
-    };
+    for (lanrdp::theme::Mode mode : {lanrdp::theme::Mode::Dark, lanrdp::theme::Mode::Light}) {
+        const auto &c = lanrdp::theme::colorsFor(mode);
 
-    for (const auto &p : pairs) {
-        const double ratio = contrastRatio(p.fg, p.bg);
-        QVERIFY2(ratio >= 4.5,
-                 qPrintable(QStringLiteral("%1：%2 压在 %3 上只有 %4:1，够不上 4.5:1")
-                                .arg(QString::fromUtf8(p.where), describe(p.fg), describe(p.bg))
-                                .arg(ratio, 0, 'f', 2)));
+        const struct {
+            const char *where;
+            QColor      bg;
+            QColor      fg;
+        } pairs[] = {
+            {"正文 / 窗口底", c.windowBg, c.textPrimary},
+            {"说明文字 / 窗口底", c.windowBg, c.textSecondary},
+            {"正文 / 控件面", c.surface, c.textPrimary},
+            {"说明文字 / 控件面", c.surface, c.textSecondary},
+            {"正文 / 悬浮条", c.overlayBar, c.textPrimary},
+            {"说明文字 / 悬浮条", c.overlayBar, c.textSecondary},
+            {"正文 / 选中条", c.overlayBarSelected, c.textPrimary},
+            {"按钮文字 / 主按钮底", c.accent, c.onAccent},
+            {"危险动作 / 悬浮条", c.overlayBar, c.danger},
+            {"正文 / 按下态底", c.surfaceActive, c.textPrimary},
+        };
+
+        for (const auto &p : pairs) {
+            const double ratio = contrastRatio(p.fg, p.bg);
+            QVERIFY2(ratio >= 4.5,
+                     qPrintable(QStringLiteral("%1主题 · %2：%3 压在 %4 上只有 %5:1，够不上 4.5:1")
+                                    .arg(QString::fromUtf8(modeNames[round]),
+                                         QString::fromUtf8(p.where), describe(p.fg),
+                                         describe(p.bg))
+                                    .arg(ratio, 0, 'f', 2)));
+        }
+        ++round;
     }
 }
 
@@ -136,14 +182,17 @@ void TestTheme::textSurvivesOnEverySurface()
 // 用户仍需要读出「这个按钮写的是什么，只是现在点不了」。
 void TestTheme::mutedTextIsStillLegibleWhenDisabled()
 {
-    const auto &c = lanrdp::theme::colors();
+    for (lanrdp::theme::Mode mode : {lanrdp::theme::Mode::Dark, lanrdp::theme::Mode::Light}) {
+        const auto &c = lanrdp::theme::colorsFor(mode);
 
-    const double onWindow = contrastRatio(c.textMuted, c.windowBg);
-    const double onSurface = contrastRatio(c.textMuted, c.surface);
-    QVERIFY2(onWindow >= 3.0,
-             qPrintable(QStringLiteral("禁用文字 / 窗口底只有 %1:1").arg(onWindow, 0, 'f', 2)));
-    QVERIFY2(onSurface >= 3.0,
-             qPrintable(QStringLiteral("禁用文字 / 控件面只有 %1:1").arg(onSurface, 0, 'f', 2)));
+        const double onWindow  = contrastRatio(c.textMuted, c.windowBg);
+        const double onSurface = contrastRatio(c.textMuted, c.surface);
+        QVERIFY2(onWindow >= 3.0,
+                 qPrintable(QStringLiteral("禁用文字 / 窗口底只有 %1:1").arg(onWindow, 0, 'f', 2)));
+        QVERIFY2(onSurface >= 3.0,
+                 qPrintable(QStringLiteral("禁用文字 / 控件面只有 %1:1")
+                                .arg(onSurface, 0, 'f', 2)));
+    }
 }
 
 void TestTheme::applyInstallsFusionAndPalette()
@@ -174,39 +223,93 @@ void TestTheme::applyInstallsFusionAndPalette()
     QCOMPARE(qApp->style(), before);
 }
 
-// 光有色板还不够 —— QSS 若还是旧色值，深色化就只剩一半。
-// 这条断言挡住「改了 colors() 却忘了同步 QSS」这种最容易发生的回归。
+// 切主题的三件事必须一起发生：色板换、palette 换、QSS 换 —— 而 QStyle 对象**不换**。
+//
+// 最后那条不是洁癖：setStyle() 会让所有控件重新 polish 一遍，正在播的画面会闪，
+// 而且外面持有的 QStyle* 会当场失效。用户只是想要浅一点的配色，不该付出这个代价。
+void TestTheme::switchingModeSwapsEverythingButTheStyle()
+{
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Dark);
+    lanrdp::theme::apply(*qApp);
+
+    QStyle *const  styleBefore = qApp->style();
+    const QString  darkQss     = qApp->styleSheet();
+    const QColor   darkWindow  = qApp->palette().color(QPalette::Window);
+
+    // 切之前先拿一份引用：控件（悬浮条、画面、各类图标）都是在绘制时现取 colors()，
+    // 这份引用必须在切换后**指向新色板**，而不是留在旧值上。
+    const lanrdp::theme::Colors &live = lanrdp::theme::colors();
+
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Light);
+    lanrdp::theme::apply(*qApp);
+
+    const auto &light = lanrdp::theme::colorsFor(lanrdp::theme::Mode::Light);
+
+    QCOMPARE(lanrdp::theme::mode(), lanrdp::theme::Mode::Light);
+    QCOMPARE(live.windowBg, light.windowBg);   // 同一份对象被整体改写
+    QCOMPARE(lanrdp::theme::colors().textPrimary, light.textPrimary);
+
+    QCOMPARE(qApp->palette().color(QPalette::Window), light.windowBg);
+    QCOMPARE(qApp->palette().color(QPalette::Base), light.surface);
+    QCOMPARE(qApp->palette().color(QPalette::WindowText), light.textPrimary);
+    QCOMPARE(qApp->palette().color(QPalette::Highlight), light.accent);
+
+    QVERIFY2(qApp->styleSheet() != darkQss, "切主题后全局 QSS 没换");
+    QVERIFY2(qApp->styleSheet().contains(light.windowBg.name()), "全局 QSS 未使用浅色底色");
+    QVERIFY2(!qApp->styleSheet().contains(darkWindow.name()), "全局 QSS 里还留着深色底");
+
+    QCOMPARE(qApp->style(), styleBefore);   // 样式对象没被重建
+
+    // 切回去也要成立（单程生效是最常见的半成品）。
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Dark);
+    lanrdp::theme::apply(*qApp);
+    QCOMPARE(qApp->palette().color(QPalette::Window), darkWindow);
+    QCOMPARE(qApp->styleSheet(), darkQss);
+    QCOMPARE(qApp->style(), styleBefore);
+}
+
+// 光有色板还不够 —— QSS 若还是旧色值，主题就只剩一半。
+// 这条断言挡住「改了 colors() 却忘了同步 QSS」这种最容易发生的回归，两套各跑一遍。
 void TestTheme::styleSheetsUseThePalette()
 {
-    const auto &c = lanrdp::theme::colors();
-    const QString app = lanrdp::theme::applicationStyleSheet();
-    const QString bar = lanrdp::theme::overlayBarStyleSheet();
+    for (lanrdp::theme::Mode mode : {lanrdp::theme::Mode::Dark, lanrdp::theme::Mode::Light}) {
+        lanrdp::theme::setMode(mode);
+        lanrdp::theme::apply(*qApp);
 
-    QVERIFY2(!app.isEmpty(), "全局 QSS 不应为空");
-    QVERIFY2(!bar.isEmpty(), "悬浮条 QSS 不应为空");
+        const auto &c   = lanrdp::theme::colors();
+        const QString app = lanrdp::theme::applicationStyleSheet();
+        const QString bar = lanrdp::theme::overlayBarStyleSheet();
 
-    // 关键选择器必须在场：少了它们，对应控件就退回系统画法。
-    const char *required[] = {
-        "QMenuBar", "QMenu", "QStatusBar", "QLineEdit", "QSpinBox",
-        "QPushButton", "QProgressBar", "QCheckBox",
-    };
-    for (const char *selector : required) {
-        QVERIFY2(app.contains(QLatin1String(selector)),
-                 qPrintable(QStringLiteral("全局 QSS 缺少 %1 的规则").arg(QLatin1String(selector))));
+        QVERIFY2(!app.isEmpty(), "全局 QSS 不应为空");
+        QVERIFY2(!bar.isEmpty(), "悬浮条 QSS 不应为空");
+
+        // 关键选择器必须在场：少了它们，对应控件就退回系统画法。
+        const char *required[] = {
+            "QMenuBar", "QMenu", "QStatusBar", "QLineEdit", "QSpinBox",
+            "QPushButton", "QProgressBar", "QCheckBox",
+        };
+        for (const char *selector : required) {
+            QVERIFY2(app.contains(QLatin1String(selector)),
+                     qPrintable(QStringLiteral("全局 QSS 缺少 %1 的规则")
+                                    .arg(QLatin1String(selector))));
+        }
+
+        // 占位符必须全部被替换掉。写成 %a / %10 这类 QString::arg 不认的形式时，
+        // 它会原样留在样式表里 —— 那条规则静默失效，界面看起来「没生效但也没报错」。
+        QVERIFY2(!app.contains(QLatin1Char('%')), "全局 QSS 里有没被替换的占位符");
+        QVERIFY2(!bar.contains(QLatin1Char('%')), "条内 QSS 里有没被替换的占位符");
+
+        // 当前主题的底色必须真的出现在样式表里。
+        QVERIFY2(app.contains(c.windowBg.name()), "全局 QSS 未使用 windowBg");
+        QVERIFY2(app.contains(c.surface.name()), "全局 QSS 未使用 surface");
+        QVERIFY2(bar.contains(c.textPrimary.name()), "条内 QSS 未使用正文色");
+        // 选中态那颗按钮的底是强调色，压在上面的文字必须取 onAccent —— 浅色主题的
+        // 正文色是近黑的，压在 #2563EB 上只有 3:1。
+        QVERIFY2(bar.contains(c.onAccent.name()), "条内 QSS 的选中态没用 onAccent 当文字色");
+        // 危险色（【断开】）现在落在**图标**上而不是样式表里 —— QSS 的 color 管不到
+        // QIcon，那条规则只会让人误以为颜色是从这儿来的。守它的是
+        // `test_mainwindow_ui::disconnectButtonStartsDisabled`（比对图标实色）。
     }
-
-    // 占位符必须全部被替换掉。写成 %a / %10 这类 QString::arg 不认的形式时，
-    // 它会原样留在样式表里 —— 那条规则静默失效，界面看起来「没生效但也没报错」。
-    QVERIFY2(!app.contains(QLatin1Char('%')), "全局 QSS 里有没被替换的占位符");
-    QVERIFY2(!bar.contains(QLatin1Char('%')), "条内 QSS 里有没被替换的占位符");
-
-    // 深色主题的底色必须真的出现在样式表里。
-    QVERIFY2(app.contains(c.windowBg.name()), "全局 QSS 未使用 windowBg");
-    QVERIFY2(app.contains(c.surface.name()), "全局 QSS 未使用 surface");
-    QVERIFY2(bar.contains(c.textPrimary.name()), "条内 QSS 未使用正文色");
-    // 危险色（【断开】）现在落在**图标**上而不是样式表里 —— QSS 的 color 管不到
-    // QIcon，那条规则只会让人误以为颜色是从这儿来的。守它的是
-    // `test_mainwindow_ui::disconnectButtonStartsDisabled`（比对图标实色）。
 }
 
 // 「矢量」不是嘴上说的：同一份路径要在 12px 到 68px、1x 到 2x 之间都画得出来。

@@ -49,8 +49,9 @@ ScreenOverlayBar::ScreenOverlayBar(QWidget *parent)
     // 注意：QToolButton 没设 icon 时会自动按「只显示文字」算尺寸，所以 setText 可见。
     //
     // 配色不写在这里 —— 条内的样式与全局主题共用同一份色板，见 ui/Theme.cpp。
-    // 条压在画面上，无论下面是白色网页还是深色壁纸都得站得住，所以它是深底浅字。
-    setStyleSheet(lanrdp::theme::overlayBarStyleSheet());
+    // 条压在画面上，无论下面是白色网页还是深色壁纸都得站得住，所以它的底与字
+    // 必须成对取自同一套色板（深色主题深底浅字，浅色主题浅底深字）。
+    applyTheme();
 
     auto *root = new QHBoxLayout(this);
     // 左边留 16：多出来的 8px 是给状态点的（画在 x≈9，不与标题重叠）。
@@ -85,6 +86,12 @@ void ScreenOverlayBar::setTitle(const QString &text)
 QString ScreenOverlayBar::title() const
 {
     return title_ ? title_->text() : QString();
+}
+
+void ScreenOverlayBar::applyTheme()
+{
+    setStyleSheet(lanrdp::theme::overlayBarStyleSheet());
+    update();   // 底色与状态点是自绘的，样式换了得重画
 }
 
 void ScreenOverlayBar::setSelected(bool on)
@@ -165,10 +172,10 @@ void ScreenOverlayBar::paintEvent(QPaintEvent *)
 
     QPainter p(this);
 
-    // 92% 不透明：留一点画面透出来，让人看得出「条浮在画面上」；
-    // 再低就压不住白色远端窗口，文字会跟着背景一起发飘。
+    // 不透明度按主题取（见 theme::overlayBarAlpha）：深色留一点画面透出来，
+    // 浅色几乎盖实，否则会糊成一块脏灰。
     QColor background = selected_ ? c.overlayBarSelected : c.overlayBar;
-    background.setAlpha(selected_ ? 242 : 235);
+    background.setAlpha(lanrdp::theme::overlayBarAlpha(selected_));
     p.fillRect(rect(), background);
 
     // 选中态：左侧一小段强调色竖条。

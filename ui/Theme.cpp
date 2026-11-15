@@ -11,9 +11,11 @@ namespace lanrdp::theme {
 
 namespace {
 
-// 色值表。这里的每一个数都受 tests/test_theme.cpp 的对比度校验约束 ——
+// 两套色板。这里的每一个数都受 tests/test_theme.cpp 的对比度校验约束 ——
 // 调色时先看测试，别只凭肉眼。
-const Colors kColors{
+//
+// 深色：底色落在暗部、文字落在亮部。
+const Colors kDark{
     QColor(0x1E, 0x1E, 0x24),   // windowBg
     QColor(0x25, 0x25, 0x2D),   // surface
     QColor(0x2E, 0x2E, 0x38),   // surfaceHover
@@ -34,9 +36,39 @@ const Colors kColors{
     QColor(0x24, 0x28, 0x33),   // overlayBarSelected
 };
 
+// 浅色：同样的角色，方向反过来。几处不是「简单取反」的地方：
+// · canvas 比窗口底更深一档（画面留白要在白底上看得出来），对应深色里它更深；
+// · accentHover 比 accent **更深** —— 浅色主题的 hover 惯例是压暗，而浅色底上
+//   白字压更亮的蓝会掉到 3:1 以下；
+// · danger / warning 都取深一号的色阶：它们是压在浅底上的文字（口令报错、
+//   明文链路警告），用深色主题那种亮红亮黄在 #FFFFFF 上只剩 2~3:1。
+const Colors kLight{
+    QColor(0xF5, 0xF6, 0xF8),   // windowBg
+    QColor(0xFF, 0xFF, 0xFF),   // surface
+    QColor(0xEC, 0xEF, 0xF4),   // surfaceHover
+    QColor(0xE1, 0xE5, 0xEC),   // surfaceActive
+    QColor(0xE6, 0xE9, 0xEE),   // canvas
+    QColor(0xD3, 0xD8, 0xE0),   // border
+    QColor(0xAE, 0xB6, 0xC4),   // borderStrong
+    QColor(0x1C, 0x1F, 0x26),   // textPrimary
+    QColor(0x4C, 0x54, 0x62),   // textSecondary
+    QColor(0x76, 0x7E, 0x8C),   // textMuted
+    QColor(0x25, 0x63, 0xEB),   // accent
+    QColor(0x1D, 0x4E, 0xD8),   // accentHover
+    QColor(0xFF, 0xFF, 0xFF),   // onAccent
+    QColor(0xB3, 0x26, 0x1E),   // danger
+    QColor(0x1A, 0x9E, 0x58),   // success
+    QColor(0x8A, 0x53, 0x00),   // warning
+    QColor(0xEF, 0xF2, 0xF7),   // overlayBar
+    QColor(0xE3, 0xEB, 0xF9),   // overlayBarSelected
+};
+
+Mode   g_mode = Mode::Dark;
+Colors g_active = kDark;   // 切模式时**整体改写**，指针不变（见头文件）
+
 // 强调色用 #2563EB 而不是更亮的蓝：白字压在 #3B82F6 上只有 3.7:1，
-// 够不上正文的 4.5:1；#2563EB 是 5.2:1。更亮的那个留给悬停。
-QPalette darkPalette(const Colors &c)
+// 够不上正文的 4.5:1；#2563EB 是 5.2:1。深色主题里更亮的那个留给悬停。
+QPalette paletteFor(const Colors &c, Mode mode)
 {
     QPalette p;
 
@@ -56,11 +88,21 @@ QPalette darkPalette(const Colors &c)
     p.setColor(QPalette::HighlightedText, c.onAccent);
 
     // 立体感的四个色阶：Fusion 画边框 / 凹槽 / 阴影时用。
-    p.setColor(QPalette::Light, c.surfaceHover);
-    p.setColor(QPalette::Midlight, c.surface);
-    p.setColor(QPalette::Mid, c.border);
-    p.setColor(QPalette::Dark, c.canvas);
-    p.setColor(QPalette::Shadow, Qt::black);
+    // 浅色主题的「暗部」只能到描边为止 —— 拿 canvas 当 Dark 会让凹陷效果
+    // 变成一圈灰糊（浅色下 canvas 与 surface 只差一档）。
+    if (mode == Mode::Light) {
+        p.setColor(QPalette::Light, c.surface);
+        p.setColor(QPalette::Midlight, c.surfaceHover);
+        p.setColor(QPalette::Mid, c.border);
+        p.setColor(QPalette::Dark, c.borderStrong);
+        p.setColor(QPalette::Shadow, QColor(0x8A, 0x91, 0x9E));
+    } else {
+        p.setColor(QPalette::Light, c.surfaceHover);
+        p.setColor(QPalette::Midlight, c.surface);
+        p.setColor(QPalette::Mid, c.border);
+        p.setColor(QPalette::Dark, c.canvas);
+        p.setColor(QPalette::Shadow, Qt::black);
+    }
 
     // 禁用态：只降文字，不动底色 —— 底色一变，禁用控件看起来像「另一个控件」。
     p.setColor(QPalette::Disabled, QPalette::WindowText, c.textMuted);
@@ -76,32 +118,74 @@ QPalette darkPalette(const Colors &c)
 
 const Colors &colors()
 {
-    return kColors;
+    return g_active;
+}
+
+const Colors &colorsFor(Mode mode)
+{
+    return mode == Mode::Light ? kLight : kDark;
+}
+
+Mode mode()
+{
+    return g_mode;
+}
+
+QString modeKey(Mode mode)
+{
+    return mode == Mode::Light ? QStringLiteral("light") : QStringLiteral("dark");
+}
+
+Mode modeFromKey(const QString &key, Mode fallback)
+{
+    const QString trimmed = key.trimmed().toLower();
+    if (trimmed == QLatin1String("light"))
+        return Mode::Light;
+    if (trimmed == QStringLiteral("dark"))
+        return Mode::Dark;
+    return fallback;
+}
+
+void setMode(Mode mode)
+{
+    g_mode   = mode;
+    g_active = colorsFor(mode);
 }
 
 void apply(QApplication &app)
 {
-    // 幂等：换样式会把所有控件重新 polish 一遍，重复调用纯属白折腾。
-    static bool applied = false;
-    if (applied)
-        return;
-    applied = true;
-
-    // ① 先告诉 Qt「本应用要深色」。
-    //    Windows 会据此把窗口标题栏也刷成深色 —— 浅色标题栏压在深色内容上，
-    //    是整扇窗最扎眼的一条白边。必须在设 palette 之前：反过来的话，
-    //    系统主题会把刚设好的 palette 又刷一遍。
+    // ① 先告诉 Qt 本应用要深色还是浅色。
+    //    Windows 会据此把窗口标题栏也刷成同色系 —— 深色标题栏压在浅色内容上
+    //    （或者反过来）是整扇窗最扎眼的一条边。必须在设 palette 之前：
+    //    反过来的话，系统主题会把刚设好的 palette 又刷一遍。
     if (QStyleHints *hints = QGuiApplication::styleHints())
-        hints->setColorScheme(Qt::ColorScheme::Dark);
+        hints->setColorScheme(g_mode == Mode::Light ? Qt::ColorScheme::Light
+                                                    : Qt::ColorScheme::Dark);
 
-    // ② Fusion。
+    // ② Fusion。**只装一次**：换样式会把所有控件重新 polish 一遍，
+    //    而且外面拿到的 QStyle* 会失效（测试正是靠这一点判断「没白折腾」）。
+    //
     //    Windows 原生样式（windowsvista）有相当多控件不吃 palette ——
     //    只改 palette 会出现「输入框已经是深色、下拉箭头还是浅色」这种半截效果。
-    if (QStyle *fusion = QStyleFactory::create(QStringLiteral("Fusion")))
-        app.setStyle(fusion);
+    static bool styleInstalled = false;
+    if (!styleInstalled) {
+        if (QStyle *fusion = QStyleFactory::create(QStringLiteral("Fusion")))
+            app.setStyle(fusion);
+        styleInstalled = true;
+    }
 
-    app.setPalette(darkPalette(kColors));
+    app.setPalette(paletteFor(g_active, g_mode));
     app.setStyleSheet(applicationStyleSheet());
+}
+
+int overlayBarAlpha(bool selected)
+{
+    // 92% 不透明（深色）：留一点画面透出来，让人看得出「条浮在画面上」；
+    // 再低就压不住白色远端窗口，文字会跟着背景一起发飘。
+    // 浅色主题几乎盖实（98%）：半透明白压在深色画面上只会糊成一层脏灰。
+    if (g_mode == Mode::Light)
+        return selected ? 252 : 250;
+    return selected ? 242 : 235;
 }
 
 QString applicationStyleSheet()
@@ -163,7 +247,8 @@ QMenu::separator {
 
     // ③ 状态栏与输入控件。
     //    状态栏比窗口底再深一档，让「内容区 / 状态区」在视觉上分层，
-    //    而不是靠一条描边硬切。
+    //    而不是靠一条描边硬切。（浅色主题下 darker() 也是「更深一档」，
+    //    方向天然正确，不必分模式。）
     ss += QStringLiteral(R"(
 QStatusBar {
     background: %1;
@@ -259,8 +344,8 @@ QString overlayBarStyleSheet()
 {
     const Colors &c = colors();
 
-    // 条压在画面上，底色比控件面再深一点、文字更亮 —— 这样无论下面是白色网页
-    // 还是深色壁纸，条都能靠自身对比度站住，而不是靠「比背景浅一点」。
+    // 条压在画面上，底色与文字必须靠自身对比度站住，而不是靠「比背景浅一点」。
+    // 深色主题是深底浅字、浅色主题是浅底深字，两者的取值都在色板里。
     QString ss = QStringLiteral(R"(
 QToolButton {
     min-height: 18px;
@@ -273,15 +358,10 @@ QToolButton {
 QToolButton:hover {
     border-color: %2;
     background: %3;
-    color: %4;
+    color: %1;
 }
-QToolButton:pressed { background: %5; }
-QToolButton:checked {
-    background: %6;
-    border-color: %7;
-    color: %4;
-}
-QToolButton:disabled { color: %8; }
+QToolButton:pressed { background: %4; }
+QToolButton:disabled { color: %5; }
 
 QLabel#overlayTitle { color: %1; font-weight: bold; }
 
@@ -296,14 +376,22 @@ QToolButton#tokenStatusButton:checked {
     border-color: transparent;
     background: transparent;
 }
-)").arg(c.textPrimary.name(),      // 1 常规文字
+)").arg(c.textPrimary.name(),      // 1 常规文字 / 悬停文字
         c.borderStrong.name(),     // 2 hover 描边
         c.surfaceActive.name(),    // 3 hover 底
-        c.textPrimary.name(),      // 4 悬停 / 选中文字
-        c.surface.name(),          // 5 按下底
-        c.accent.name(),           // 6 选中底
-        c.accentHover.name(),      // 7 选中描边
-        c.textMuted.name());       // 8 禁用
+        c.surface.name(),          // 4 按下底
+        c.textMuted.name());       // 5 禁用
+
+    // 选中态的底是强调色 —— 压在上面的文字必须取 onAccent，**不能**跟着常规文字走：
+    // 浅色主题的正文色是近黑的，压在 #2563EB 上只有 3:1。深色主题里 onAccent 是
+    // 纯白，比正文色（#E8E8EE）还稳一点，所以两套都取它。
+    ss += QStringLiteral(R"(
+QToolButton:checked {
+    background: %1;
+    border-color: %2;
+    color: %3;
+}
+)").arg(c.accent.name(), c.accentHover.name(), c.onAccent.name());
 
     // 【断开】是危险动作，用的是告警色 —— 但它是**图标按钮**，颜色落在图形上
     // （`RemoteView` 建按钮时取 `colors().danger`），样式表里的 color 管不到 QIcon，

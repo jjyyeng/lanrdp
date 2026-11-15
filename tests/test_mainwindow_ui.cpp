@@ -30,6 +30,7 @@
 #include "app/Dialogs.h"
 #include "app/MainWindow.h"
 #include "app/SessionStore.h"
+#include "app/SingleInstance.h"
 #include "common/I18n.h"
 #include "ui/Theme.h"
 #include "app/WindowStatus.h"
@@ -93,10 +94,14 @@ private slots:
     void overlayBarDoesNotForwardInputToRemote();
     void viewMenuTogglesOverlayBar();
     void statusBarIsIndependentOfOverlayBar();
-    // 【设置】里的音频开关：可勾选、默认开、切换不崩（此刻没有任何连接 ⇒ 不该碰设备）
-    void settingsMenuHasAudioSwitch();
+    // 连接 / 窗口 / 控制这几项开关只在【设置…】里，菜单里不该再有一份
+    void menuNoLongerDuplicatesTheDialogSwitches();
     // 语言切换必须当场把**已经在屏幕上**的界面换掉（用户不会为换语言重启）
     void switchingLanguageRefreshesTheExistingWindow();
+    // 主题切换同理，而且更难：条内样式与那批「颜色烘死在图标里」的按钮都得重来
+    void switchingThemeRefreshesTheExistingWindow();
+    // 换过主题要记住，下次启动还是那一套
+    void remembersTheChosenTheme();
 
     // 多屏：单屏用户界面零变化；多屏时条上多一颗【屏幕】，菜单项与屏列表一致
     void screenButtonAppearsOnlyWithMultipleScreens();
@@ -108,6 +113,8 @@ private slots:
     // 三个对话框
     void dialogsRoundTripTheirConfig();
     void dialogsAreDarkToo();
+    // 切到浅色之后新开的对话框也得是浅色（它们走的是同一份全局 QSS）
+    void dialogsFollowTheLightTheme();
     void hostDialogExplainsFirewallPrompt();
     // 明文链路要明说：不做 TLS 的取舍必须摊在用户眼前
     void hostDialogSaysTrafficIsUnencrypted();
@@ -172,6 +179,9 @@ private slots:
     void failedConnectSchedulesReconnect();
     void userDisconnectCancelsPendingReconnect();
     void uncheckedAutoReconnectDoesNotSchedule();
+
+    // 四项跨会话行为偏好（自动重连 / 声音 / 托盘 / 单实例）：在对话框里改了就记住
+    void remembersBehaviorSwitches();
 
     // 手工验证时发现的瑕疵：重连待命时点【断开】，界面没跟着复位
     void userDisconnectWhileReconnectPendingResetsUi();
@@ -297,6 +307,9 @@ QByteArray readWholeFile(const QString &path)
 void TestMainWindowUi::init()
 {
     lanrdp::setUiLanguage(lanrdp::UiLanguage::Chinese);
+    // 主题同理：它是进程级状态，切到浅色的用例会把后面按深色取的断言全带偏。
+    // 这里只钉「色板是哪套」——palette / QSS 由需要它们的用例自己 apply()。
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Dark);
 }
 
 // 纯函数：贴顶、满宽、高度固定。抽出来就是为了不起真窗口也能钉住这条约束。
@@ -676,26 +689,26 @@ void TestMainWindowUi::overlayBarDoesNotForwardInputToRemote()
     QCOMPARE(dropped.count(), 0);
 }
 
-// 条会遮住画面顶部约 30 逻辑像素（远端窗口的标题栏 / 最大化按钮可能
-// 因此点不到），所以必须留一个收起入口。Ctrl+L 是早就有的肌肉记忆。
-void TestMainWindowUi::settingsMenuHasAudioSwitch()
+// 连接 / 窗口 / 控制这几项开关**只**在【设置…】对话框里，菜单里不再各放一份。
+//
+// 同一个状态有两处可编辑，就必然有一处忘记同步 —— 这条是反证，专抓「菜单里又
+// 冒出第 5 项」这种回归。菜单只保留「打开设置」与两个纯外观偏好。
+void TestMainWindowUi::menuNoLongerDuplicatesTheDialogSwitches()
 {
     MainWindow w(testLogPath());
-    w.show();
-    QVERIFY(QTest::qWaitForWindowExposed(&w));
 
-    auto *audio = w.findChild<QAction *>(QStringLiteral("actionReceiveAudio"));
-    QVERIFY2(audio, "【设置】菜单里应当有「接收对方的声音」");
-    QVERIFY2(audio->isCheckable(), "开关项应当可勾选");
-    QVERIFY2(audio->isChecked(),
-             "默认应当接收声音 —— 默认关会变成「明明连着却听不见」这种无从解释的现象");
-    QVERIFY2(!audio->statusTip().isEmpty(), "全局开关也应当有一句说明");
+    QVERIFY2(w.findChild<QAction *>(QStringLiteral("actionOpenSettings")),
+             "【设置】菜单里的入口应当在");
 
-    // 切两次都不许崩：此刻没有任何连接，切换不该去碰声卡（碰了就会在没设备的机器上炸）
-    audio->trigger();
-    QVERIFY(!audio->isChecked());
-    audio->trigger();
-    QVERIFY(audio->isChecked());
+    for (const char *name : {"actionReceiveAudio", "actionAutoReconnect",
+                             "actionTrayResident", "actionSingleInstance"}) {
+        QVERIFY2(!w.findChild<QAction *>(QLatin1String(name)),
+                 qPrintable(QStringLiteral("%1 应当只在【设置…】对话框里，菜单里不该再有一份")
+                                .arg(QLatin1String(name))));
+    }
+
+    // 声音默认开：默认关会变成「明明连着却听不见」这种无从解释的现象。
+    QVERIFY2(w.receiveAudioEnabled(), "声音默认应当是开的");
 }
 
 // 语言切换必须当场把**已经在屏幕上**的界面换掉 —— 没人会为换语言去重启。
@@ -752,6 +765,117 @@ void TestMainWindowUi::switchingLanguageRefreshesTheExistingWindow()
     QCOMPARE(title->text(), QStringLiteral("尚未连接"));
     QCOMPARE(primary->text(), QStringLiteral("连接远程电脑"));
     QCOMPARE(status->text(), QStringLiteral("就绪"));
+}
+
+// 主题切换比语言切换多一层麻烦：**图标的颜色是烘死的**。
+//
+// 语言只改字符串，Qt 会把 LanguageChange 派发给每个控件；而条上那批按钮没有文字，
+// 颜色在 `glyph::icon(shape, color)` 那一刻就进了位图，条还自带一份私有 QSS。
+// 所以这条用例不只验 palette，还要验：
+//   · 条的样式表真的换了（不换 = 浅色窗口上顶着一条深色条）；
+//   · 条上图标真的重画了（不重画 = 浅底上一批浅色小图标，等于没有图标）；
+//   · 空态层的大图标同理（它是 QLabel 里的 QPixmap）。
+void TestMainWindowUi::switchingThemeRefreshesTheExistingWindow()
+{
+    MainWindow w(testLogPath());
+    w.resize(1100, 760);
+    w.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&w));
+    QTest::qWait(50);
+
+    auto *view = w.viewAt(0);
+    QVERIFY(view);
+    auto *bar        = view->bar();
+    auto *disconnect = view->disconnectButton();
+    auto *emptyIcon  = view->emptyState()
+                          ? view->emptyState()->findChild<QLabel *>(QStringLiteral("emptyIcon"))
+                          : nullptr;
+    QVERIFY2(bar && disconnect, "条与条上的按钮应当存在");
+    QVERIFY2(emptyIcon, "空态层应当有一颗大图标（objectName=emptyIcon）");
+
+    auto *dark  = w.findChild<QAction *>(QStringLiteral("actionThemeDark"));
+    auto *light = w.findChild<QAction *>(QStringLiteral("actionThemeLight"));
+    QVERIFY2(dark && light, "【设置 → 外观】下应当有深色 / 浅色两项");
+    QVERIFY2(dark->isCheckable() && light->isCheckable(), "两项都该可勾选");
+    QVERIFY2(!dark->statusTip().isEmpty() && !light->statusTip().isEmpty(),
+             "两项都该有一句说明");
+
+    // 起点显式钉成深色（不能靠上一条用例留下的全局状态）。
+    dark->trigger();
+    QCoreApplication::processEvents();
+    QCOMPARE(lanrdp::theme::mode(), lanrdp::theme::Mode::Dark);
+    QVERIFY2(dark->isChecked() && !light->isChecked(), "勾选态应当落在深色上");
+
+    const lanrdp::theme::Colors &darkColors = lanrdp::theme::colorsFor(lanrdp::theme::Mode::Dark);
+    const lanrdp::theme::Colors &lightColors = lanrdp::theme::colorsFor(lanrdp::theme::Mode::Light);
+
+    QCOMPARE(qApp->palette().color(QPalette::Window), darkColors.windowBg);
+    const QString darkBarQss   = bar->styleSheet();
+    const QImage  darkIcon     = disconnect->icon().pixmap(QSize(18, 18)).toImage();
+    const QImage  darkBigIcon  = emptyIcon->pixmap().toImage();
+    QVERIFY2(!darkIcon.isNull() && !darkBigIcon.isNull(), "起点这两张图应当是画得出来的");
+
+    // ---- 切到浅色 ----
+    light->trigger();
+    QCoreApplication::processEvents();
+
+    QCOMPARE(lanrdp::theme::mode(), lanrdp::theme::Mode::Light);
+    QVERIFY2(light->isChecked() && !dark->isChecked(), "勾选态应当跟着切到浅色");
+
+    QCOMPARE(qApp->palette().color(QPalette::Window), lightColors.windowBg);
+    QCOMPARE(qApp->palette().color(QPalette::WindowText), lightColors.textPrimary);
+
+    QVERIFY2(bar->styleSheet() != darkBarQss, "切主题后悬浮条还在用深色那份 QSS");
+    QVERIFY2(bar->styleSheet().contains(lightColors.textPrimary.name()),
+             "条内 QSS 没换成浅色主题的正文色");
+
+    const QImage lightIcon = disconnect->icon().pixmap(QSize(18, 18)).toImage();
+    QVERIFY2(!lightIcon.isNull(), "浅色主题下图标不能变成空图");
+    QVERIFY2(lightIcon != darkIcon,
+             "条上图标没重画 —— 颜色是烘在 QIcon 里的，浅底上会是一批浅色小图标");
+
+    const QImage lightBigIcon = emptyIcon->pixmap().toImage();
+    QVERIFY2(!lightBigIcon.isNull(), "浅色主题下空态大图标不能消失");
+    QVERIFY2(lightBigIcon != darkBigIcon, "空态大图标没按新色板重画");
+
+    // ---- 切回深色：两张图要能回到原样，不能只单程生效 ----
+    dark->trigger();
+    QCoreApplication::processEvents();
+    QCOMPARE(qApp->palette().color(QPalette::Window), darkColors.windowBg);
+    QCOMPARE(bar->styleSheet(), darkBarQss);
+    QCOMPARE(disconnect->icon().pixmap(QSize(18, 18)).toImage(), darkIcon);
+}
+
+// 换过主题要记住 —— 否则每次开机都要再点一遍，跟语言是一个道理。
+// 顺带守住「不持久化时不许乱改全局主题」的另一半：不带 ini 的窗口只读不写。
+void TestMainWindowUi::remembersTheChosenTheme()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString ini = QDir(dir.path()).absoluteFilePath(QStringLiteral("session.ini"));
+
+    {
+        MainWindow w(testLogPath(), ini);
+        auto *light = w.findChild<QAction *>(QStringLiteral("actionThemeLight"));
+        QVERIFY2(light, "【设置 → 外观】下应当有浅色项");
+
+        light->trigger();
+        QCoreApplication::processEvents();
+        QCOMPARE(lanrdp::theme::mode(), lanrdp::theme::Mode::Light);
+    }
+
+    QCOMPARE(lanrdp::SessionStore(ini).loadUiTheme(), QStringLiteral("light"));
+
+    // 新窗口按 ini 装主题：构造时就得是浅色（不是先深色再刷一下）。
+    MainWindow again(testLogPath(), ini);
+    QCOMPARE(lanrdp::theme::mode(), lanrdp::theme::Mode::Light);
+    auto *light = again.findChild<QAction *>(QStringLiteral("actionThemeLight"));
+    QVERIFY2(light && light->isChecked(), "重开之后勾选态应当还在浅色上");
+
+    // 断掉的路径：不传 ini 的窗口不该写任何东西（30+ 条用例都走这条）。
+    lanrdp::SessionStore disabled;
+    QVERIFY(!disabled.saveUiTheme(QStringLiteral("light")));
+    QVERIFY(disabled.loadUiTheme().isEmpty());
 }
 
 void TestMainWindowUi::viewMenuTogglesOverlayBar()
@@ -871,6 +995,7 @@ void TestMainWindowUi::statusBaselineResetsWhenSwitchingCells()
 // QPainter 渲染，颜色与真机一致），也比截屏可靠。
 void TestMainWindowUi::dialogsAreDarkToo()
 {
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Dark);
     lanrdp::theme::apply(*qApp);
 
     lanrdp::HostConfigDialog host(lanrdp::HostConfigDialog::Config{}, nullptr);
@@ -899,6 +1024,47 @@ void TestMainWindowUi::dialogsAreDarkToo()
                  qPrintable(QStringLiteral("对话框%1角是 %2 —— 深色主题没有覆盖到它")
                                 .arg(QString::fromUtf8(c.where), px.name())));
     }
+}
+
+// 反过来也要成立：切到浅色之后新开的对话框必须是浅色。
+//
+// 对话框是**独立顶层窗口**，它没有自己的样式——颜色全来自全局 QSS 与 palette。
+// 一旦 apply() 只换了色板没重装 QSS（或者反过来），这里会立刻露出一块深色底，
+// 而主窗口看起来完全正常 —— 那是最容易漏、也最刺眼的一半。
+void TestMainWindowUi::dialogsFollowTheLightTheme()
+{
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Light);
+    lanrdp::theme::apply(*qApp);
+
+    lanrdp::HostConfigDialog host(lanrdp::HostConfigDialog::Config{}, nullptr);
+    host.resize(460, 300);
+    host.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&host));
+
+    const QImage shot = host.grab().toImage();
+    QVERIFY2(!shot.isNull(), "对话框应当能被渲染成图像");
+
+    const struct {
+        const char *where;
+        int         x;
+        int         y;
+    } corners[] = {
+        {"左上", 4, 4},
+        {"右上", shot.width() - 5, 4},
+        {"左下", 4, shot.height() - 5},
+        {"右下", shot.width() - 5, shot.height() - 5},
+    };
+
+    for (const auto &c : corners) {
+        const QColor px = shot.pixelColor(c.x, c.y);
+        QVERIFY2(px.lightness() > 200,
+                 qPrintable(QStringLiteral("对话框%1角是 %2 —— 浅色主题没有覆盖到它")
+                                .arg(QString::fromUtf8(c.where), px.name())));
+    }
+
+    // 收尾：把全局状态还回深色（init 也会做，但别把下一条用例的起点交给运气）。
+    lanrdp::theme::setMode(lanrdp::theme::Mode::Dark);
+    lanrdp::theme::apply(*qApp);
 }
 
 // 防火墙只在某个端口**第一次**被监听时问一次：用户当时点了跳过，系统会生成
@@ -1227,38 +1393,61 @@ void TestMainWindowUi::dialogsRoundTripTheirConfig()
     // 【设置…】
     lanrdp::SettingsDialog::Config sc;
     sc.autoReconnect  = false;
-    sc.inputEnabled   = true;
+    sc.receiveAudio   = false;
+    sc.trayResident   = true;
     sc.singleInstance = true;
+    sc.inputEnabled   = true;
     lanrdp::SettingsDialog setDlg(sc);
 
     const auto sc2 = setDlg.config();
     QVERIFY2(!sc2.autoReconnect, "自动重连开关应当忠实反映入参");
-    QVERIFY2(sc2.inputEnabled, "键鼠总开关应当忠实反映入参");
+    QVERIFY2(!sc2.receiveAudio, "声音开关应当忠实反映入参");
+    QVERIFY2(sc2.trayResident, "托盘开关应当忠实反映入参");
     QVERIFY2(sc2.singleInstance, "单实例开关应当忠实反映入参");
+    QVERIFY2(sc2.inputEnabled, "键鼠开关应当忠实反映入参");
 }
 
-// 【设置…】是两个「跨会话全局开关」的**唯一**编辑处，且刻意**不含**
+// 【设置…】是连接 / 窗口 / 控制这几项开关的**唯一**编辑处，且刻意**不含**
 // 端口 / 口令 / 接收目录 —— 那些属于「启动一次会话」的参数（在【开始监听…】里）。
-// 同一个状态有两处可编辑，就必然有一处会忘记同步。
+//
+// 同一个状态有两处可编辑，就必然有一处会忘记同步（这批改动正是把菜单里那份
+// 重复入口删掉，见 menuNoLongerDuplicatesTheDialogSwitches）。
 void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
 {
     lanrdp::SettingsDialog dlg({});
 
-    QVERIFY2(dlg.findChild<QAbstractButton *>(QStringLiteral("autoReconnectCheck")),
-             "【设置…】应当有「断线自动重连」");
-    QVERIFY2(dlg.findChild<QAbstractButton *>(QStringLiteral("inputCheck")),
-             "【设置…】应当有「启用远程键鼠控制」");
+    // 五项都要在。少一项的后果是「这个开关在界面上不存在」，比多一项严重得多。
+    struct Expect {
+        const char *name;
+        const char *what;
+        bool        checked;
+    };
+    const Expect expects[] = {
+        {"autoReconnectCheck", "断线自动重连", true},
+        {"audioCheck", "接收对方声音", true},
+        {"trayResidentCheck", "最小化到托盘", false},
+        {"singleInstanceCheck", "同时只开一个窗口", false},
+        {"inputCheck", "键鼠控制", false},
+    };
 
-    // 托盘常驻：默认必须关。默认开会让「最小化 = 还在后台跑」在用户不知情时成立，
-    // 而这正是这个功能当初被否掉的理由。
-    auto *trayCheck = dlg.findChild<QAbstractButton *>(QStringLiteral("trayResidentCheck"));
-    QVERIFY2(trayCheck, "【设置…】应当有「最小化时收进通知区域」");
-    QVERIFY2(!trayCheck->isChecked(), "托盘常驻默认必须是关的");
+    for (const auto &e : expects) {
+        auto *check = dlg.findChild<QAbstractButton *>(QLatin1String(e.name));
+        QVERIFY2(check, qPrintable(QStringLiteral("【设置…】缺少「%1」（objectName=%2）")
+                                       .arg(QString::fromUtf8(e.what), QLatin1String(e.name))));
+        QCOMPARE(check->isChecked(), e.checked);
+    }
 
-    // 单实例：同理默认关 —— 拦不拦双开是用户的选择，不该替他做。
-    auto *singleCheck = dlg.findChild<QAbstractButton *>(QStringLiteral("singleInstanceCheck"));
-    QVERIFY2(singleCheck, "【设置…】应当有「只允许运行一个程序窗口」");
-    QVERIFY2(!singleCheck->isChecked(), "单实例默认必须是关的");
+    // 默认值里的两条是**刻意的**：托盘与单实例都改「关窗口 = 退出」「能不能多开」
+    // 这两条语义，不该替用户决定；而要开的人勾一次就会被记住。
+    // 声音默认开 —— 默认关会变成「明明连着却听不见」这种无从解释的现象。
+
+    // 五项里只有「键鼠控制」不落盘，必须在界面上说清，否则用户会以为它也被记住了。
+    auto *footnote = dlg.findChild<QLabel *>(QStringLiteral("formFootnote"));
+    QVERIFY2(footnote, "要有一句总说明：哪些会被保存");
+    QVERIFY2(footnote->text().contains(QStringLiteral("自动保存")),
+             "总说明要交代「会被保存」");
+    QVERIFY2(footnote->text().contains(QStringLiteral("键鼠控制")),
+             "总说明要点出唯一的例外是键鼠控制");
 
     // 反证：启动参数不该出现在这里
     QVERIFY2(!dlg.findChild<QWidget *>(QStringLiteral("portEdit")),
@@ -1861,17 +2050,76 @@ void TestMainWindowUi::sendFileCliShutdownDeliversLargeFile()
 // 断线自动重连
 // ---------------------------------------------------------------------------
 
-// 「断线自动重连」默认开（它只存在于【设置…】里，主窗口只留状态查询）。
+// 「断线自动重连」默认开、声音默认开，且对话框打开时读到的就是当前状态。
+//
+// 对话框的初值来自成员，成员来自 ini —— 这条把链路两头都钉一下：只测成员不测
+// 对话框，会漏掉「勾选态没跟着读」；只测对话框不测成员，会漏掉「没读 ini」。
 void TestMainWindowUi::autoReconnectDefaultsOn()
 {
     MainWindow w(testLogPath());
     QVERIFY2(w.autoReconnectEnabled(), "按设计默认开启");
+    QVERIFY2(w.receiveAudioEnabled(), "声音按设计默认开启");
 
-    // 对话框打开时读的就是这个状态当初始值
-    lanrdp::SettingsDialog dlg({ w.autoReconnectEnabled(), false });
-    auto *check = dlg.findChild<QAbstractButton *>(QStringLiteral("autoReconnectCheck"));
-    QVERIFY(check);
-    QVERIFY2(check->isChecked(), "对话框初值应当反映当前状态");
+    lanrdp::SettingsDialog::Config cfg;
+    cfg.autoReconnect = w.autoReconnectEnabled();
+    cfg.receiveAudio  = w.receiveAudioEnabled();
+    lanrdp::SettingsDialog dlg(cfg);
+
+    auto *reconnect = dlg.findChild<QAbstractButton *>(QStringLiteral("autoReconnectCheck"));
+    auto *audio     = dlg.findChild<QAbstractButton *>(QStringLiteral("audioCheck"));
+    QVERIFY(reconnect && audio);
+    QVERIFY2(reconnect->isChecked(), "对话框初值应当反映当前状态");
+    QVERIFY2(audio->isChecked(), "对话框初值应当反映当前状态");
+}
+
+// 在【设置…】里改一次就记住 —— 而且**真的生效**。
+//
+// 后半段是本用例的重点：成员变成 true 却没去 listen，是这类开关最容易出的哑火
+// 状态 —— 对话框里勾着、双击第二个程序照样开出第二个窗口，界面与行为对不上。
+// 判据只能是「名字被占住了」（`notifyRunning` 连得上），不能只看成员。
+void TestMainWindowUi::remembersBehaviorSwitches()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString ini = QDir(dir.path()).absoluteFilePath(QStringLiteral("session.ini"));
+
+    {
+        MainWindow w(testLogPath(), ini);
+        QVERIFY(w.autoReconnectEnabled());
+
+        // 走的是和用户点【确定】完全相同的路径（openSettingsDialog 最后一步）
+        lanrdp::SettingsDialog::Config picked;
+        picked.autoReconnect  = false;
+        picked.receiveAudio   = false;
+        picked.trayResident   = true;
+        picked.singleInstance = true;
+        picked.inputEnabled   = false;
+        w.applySettings(picked);
+
+        // 当场生效，不是等重启
+        QVERIFY2(!w.autoReconnectEnabled(), "自动重连关了应当立刻不重连");
+        QVERIFY2(!w.receiveAudioEnabled(), "声音关了应当立刻静音");
+        QVERIFY2(w.trayResidentEnabled() && w.singleInstanceEnabled(), "两项应当当场打开");
+    }
+
+    // 窗口没了，单实例的名字必须立刻放掉 —— 否则进程退了还在拦人。
+    QVERIFY2(!lanrdp::SingleInstanceGuard::notifyRunning(lanrdp::singleInstanceKey()),
+             "窗口析构后名字应当已释放");
+
+    {
+        MainWindow w(testLogPath(), ini);
+
+        QVERIFY2(w.trayResidentEnabled(), "「最小化到托盘」应当被记住");
+        QVERIFY2(w.singleInstanceEnabled(), "「同时只开一个窗口」应当被记住");
+        QVERIFY2(!w.autoReconnectEnabled(),
+                 "自动重连的「关」也应当被记住（不能因为 false 就当没存过）");
+        QVERIFY2(!w.receiveAudioEnabled(), "声音的「关」应当被记住");
+
+        QVERIFY2(lanrdp::SingleInstanceGuard::notifyRunning(lanrdp::singleInstanceKey()),
+                 "勾了单实例就必须真的在监听 —— 只改成员不改管道就是哑火");
+    }
+
+    QVERIFY(!lanrdp::SingleInstanceGuard::notifyRunning(lanrdp::singleInstanceKey()));
 }
 
 // 连不上的时候也要排重连（否则「先开控制端、后开被控端」这种顺序就没法自动恢复）。

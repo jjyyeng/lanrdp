@@ -111,7 +111,10 @@ private:
     QLabel    *error_    = nullptr;
 };
 
-// 【设置…】：**本次运行内**的全局开关（不落盘、不跨会话，退出即恢复默认）。
+// 【设置…】：连接、窗口与控制选项的唯一编辑处。
+//
+// 其中四项会被记住（落盘在 `app/` 下）；「键鼠控制」每次启动都要重新开启 ——
+// 那是把本机操作发到别人机器上的能力，不该默认继承上一次的同意。
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
@@ -119,9 +122,10 @@ class SettingsDialog : public QDialog
 public:
     struct Config {
         bool autoReconnect  = true;   // 断线自动重连
-        bool inputEnabled   = false;  // 启用远程键鼠控制
-        bool trayResident   = false;  // 最小化时收进通知区域
-        bool singleInstance = false;  // 只允许运行一个实例
+        bool receiveAudio   = true;   // 接收对方声音
+        bool trayResident   = false;  // 最小化到托盘
+        bool singleInstance = false;  // 同时只开一个窗口
+        bool inputEnabled   = false;  // 键鼠控制（仅本次运行）
     };
 
     explicit SettingsDialog(const Config &initial, QWidget *parent = nullptr);
@@ -130,9 +134,10 @@ public:
 
 private:
     QCheckBox *autoReconnect_  = nullptr;
-    QCheckBox *input_          = nullptr;
+    QCheckBox *audio_          = nullptr;
     QCheckBox *tray_           = nullptr;
     QCheckBox *singleInstance_ = nullptr;
+    QCheckBox *input_          = nullptr;
 };
 
 } // namespace lanrdp

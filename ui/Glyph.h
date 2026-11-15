@@ -13,8 +13,10 @@ namespace lanrdp::glyph {
 // 准备多套位图，也不必往 qrc 里塞 svg（那还得带上 qsvgicon 插件，缺了只是
 // 静默不出图）。
 //
-// 颜色在**创建时**固定：项目没有运行时换主题（theme::apply() 只在启动时调一次），
-// 做成随 palette 重算反而多一层要维护的间接。禁用态由引擎自己降透明度。
+// 颜色在**创建时**固定，不随 palette 自动重算。换主题（深色 ⇄ 浅色）时由各个
+// 持有者调 `applyTheme()` 整套重建图标 —— 这是刻意的：QIcon 的颜色是烘进去的，
+// 让它自己跟着 palette 变需要一层 QIconEngine 的 state 回报，反而多一处要维护的
+// 间接。重建一次只发生在用户主动切主题那一下。禁用态由引擎自己降透明度。
 enum class Shape {
     Monitor,       // 显示器轮廓
     MonitorOut,    // 屏幕 + 指出去的箭头（连对方）

@@ -21,18 +21,22 @@ external services, no installer.
 - **File transfer**: drag a file onto the view; the receiver picks the destination folder; 4 GiB
   per file
 - **Two-way clipboard sync**
-- **Audio**: the viewer can hear the host's system sound (downlink only; can be disabled in
-  settings)
-- **Automatic reconnect** with backoff, plus heartbeat-based dead-peer detection
+- **Audio**: the viewer can hear the host's system sound (downlink only; can be turned off under
+  *Settings…*)
+- **Automatic reconnect** with backoff (on by default), plus heartbeat-based dead-peer detection
 - **Adaptive bitrate**: adjusts to network conditions; the cap is selectable in
   *Start Listening…* (4 / 8 / 12 / 16 Mbps, default 8)
 - **Tray residency** (optional, off by default): minimizing or closing the window moves it to the
   notification area and sharing continues
 - **Single instance** (optional, off by default): launching again focuses the existing window
   instead of opening a second one
+- **Five switches in one place — *Settings…***: receive remote audio / mouse and keyboard /
+  reconnect automatically / minimize to tray / one window at a time. All are remembered except
+  *mouse and keyboard*, which is re-approved on every launch
 - **UI in Chinese or English**: *Settings → Language* offers 中文 / English / Follow system, and the
   switch applies immediately (no restart)
-- Dark UI; `windeployqt` turns the build into a portable folder that runs without a Qt installation
+- **Dark and light themes**: *Settings → Appearance*, applied immediately and remembered
+- `windeployqt` turns the build into a portable folder that runs without a Qt installation
 
 ## Getting it
 
@@ -62,13 +66,14 @@ the steps below.
 4. If the host has two or more displays, a **Screen** button appears on the floating bar — use it
    to choose which one to view (only one is streamed at a time; single-monitor hosts never show
    this button)
-5. To hear the host: menu **Settings → Receive Remote Audio** (on by default)
+5. To hear the host: menu **Settings → Settings…** → tick **Receive remote audio** (on by default,
+   remembered)
 
 ### Things to know
 
 - **Both ends must run the same build.** A protocol mismatch shows up as a refused connection or a
   picture that never arrives
-- **With "minimize to notification area" enabled, closing the window does not quit**: the window
+- **With "minimize to tray" enabled, closing the window does not quit**: the window
   goes to the notification area and the process keeps sharing. To really quit, right-click the tray
   icon → **Stop Sharing**, then close the window (on Windows 11 the tray icon hides under the `^`
   overflow by default)

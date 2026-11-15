@@ -19,6 +19,10 @@ private slots:
     void roundTripsSecretThroughDpapi();
     void roundTripsHostSession();
     void roundTripsPeerSession();
+    // 界面外观（ui/theme）：与语言同一个 ini、互不覆盖
+    void roundTripsUiTheme();
+    // 三项行为偏好（app/*）的三态：没存过 / on / off 必须分得开
+    void roundTripsBehaviorSwitches();
     void keepsPasswordOutOfPlainText();
     void ignoresCorruptedSecret();
     void fallsBackOnInsaneValues();
@@ -99,6 +103,78 @@ void TestSessionStore::roundTripsPeerSession()
     QCOMPARE(out.host, in.host);
     QCOMPARE(out.port, in.port);
     QCOMPARE(out.password, in.password);
+}
+
+// 外观偏好与语言同住一个 ini：写其中一项不能把另一项冲掉
+//（QSettings 只改自己那个键，但这条约定值得钉住 —— 冲掉的表现是「换主题之后
+//  界面语言回到中文」，用户根本不会把两件事联系起来）。
+void TestSessionStore::roundTripsUiTheme()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    lanrdp::SessionStore store(iniPath(dir));
+
+    // 没存过 ⇒ 空串。**不返回默认键**：「没选过」与「明确选了深色」是两件事。
+    QVERIFY2(store.loadUiTheme().isEmpty(), "没存过应当是空串，由调用方决定默认值");
+
+    QVERIFY(store.saveUiTheme(QStringLiteral("light")));
+    QCOMPARE(store.loadUiTheme(), QStringLiteral("light"));
+
+    QVERIFY(store.saveUiLanguage(QStringLiteral("en")));
+    QCOMPARE(store.loadUiTheme(), QStringLiteral("light"));      // 语言没把主题冲掉
+    QCOMPARE(store.loadUiLanguage(), QStringLiteral("en"));
+
+    QVERIFY(store.saveUiTheme(QStringLiteral("dark")));
+    QCOMPARE(store.loadUiTheme(), QStringLiteral("dark"));       // 能改回去
+    QCOMPARE(store.loadUiLanguage(), QStringLiteral("en"));      // 主题没把语言冲掉
+}
+
+// 三项行为偏好与语言/主题同住一个 ini。要守住三件事：
+//   ① 「没存过」必须是 nullopt —— 否则首启套不上各自的默认值，用户也永远回不到默认；
+//   ② 存 false 之后必须读回 false（不能因为 false 就等于「没存过」）；
+//   ③ 写这三项不能把语言/主题或口令参数冲掉。
+void TestSessionStore::roundTripsBehaviorSwitches()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    lanrdp::SessionStore store(iniPath(dir));
+
+    const QString keys[] = {lanrdp::appAutoReconnectKey(), lanrdp::appReceiveAudioKey(),
+                            lanrdp::appTrayResidentKey(), lanrdp::appSingleInstanceKey()};
+    for (const QString &key : keys) {
+        QVERIFY2(!key.isEmpty(), "键名不能为空");
+        QVERIFY2(!store.loadAppSwitch(key).has_value(),
+                 qPrintable(QStringLiteral("%1 没存过时必须返回 nullopt").arg(key)));
+    }
+
+    // 三项分开存：勾一项不该顺手把另外两项也写成 true
+    QVERIFY(store.saveAppSwitch(lanrdp::appTrayResidentKey(), true));
+    QVERIFY2(store.loadAppSwitch(lanrdp::appTrayResidentKey()).value_or(false),
+             "存了 true 应当读回 true");
+    QVERIFY2(!store.loadAppSwitch(lanrdp::appSingleInstanceKey()).has_value(),
+             "只勾了托盘，单实例应当仍是「没存过」");
+    QVERIFY2(!store.loadAppSwitch(lanrdp::appAutoReconnectKey()).has_value(),
+             "只勾了托盘，自动重连应当仍是「没存过」");
+    QVERIFY2(!store.loadAppSwitch(lanrdp::appReceiveAudioKey()).has_value(),
+             "只勾了托盘，声音应当仍是「没存过」");
+
+    // 关掉必须能读回「明确关掉了」
+    QVERIFY(store.saveAppSwitch(lanrdp::appAutoReconnectKey(), false));
+    const auto reconnect = store.loadAppSwitch(lanrdp::appAutoReconnectKey());
+    QVERIFY2(reconnect.has_value(), "存了 false 也算存过 —— 不能退化成「没存过」");
+    QVERIFY(!*reconnect);
+
+    // 写别的键不该互相冲掉 —— 冲掉的表现是「换了主题，单实例又变回默认」
+    QVERIFY(store.saveUiTheme(QStringLiteral("light")));
+    QVERIFY(store.saveAppSwitch(lanrdp::appSingleInstanceKey(), true));
+    QCOMPARE(store.loadUiTheme(), QStringLiteral("light"));
+    QVERIFY(store.loadAppSwitch(lanrdp::appTrayResidentKey()).value_or(false));
+    QVERIFY(store.loadAppSwitch(lanrdp::appSingleInstanceKey()).value_or(false));
+
+    // 停用时一律 nullopt / 写失败（测试与自动化不会碰真实配置）
+    lanrdp::SessionStore disabled;
+    QVERIFY(!disabled.loadAppSwitch(lanrdp::appTrayResidentKey()).has_value());
+    QVERIFY(!disabled.saveAppSwitch(lanrdp::appTrayResidentKey(), true));
 }
 
 // ini 是纯文本，用户/备份工具/同步盘都能读到。口令一旦以明文躺在里面，
