@@ -43,6 +43,10 @@ add_library(lanrdp_core STATIC
     net/FileReceiver.cpp
     net/FileSender.cpp
     net/ClipboardSync.cpp
+    # 往返时间（SIO_TCP_INFO）：质量读数里唯一需要问操作系统的量。
+    net/TcpRtt.cpp
+    # 局域网自动发现（UDP 广播）：跟 TCP 协议版本无关的旁路通道。
+    net/Discovery.cpp
     # Phase 13：控制端「一条连接」的容器（为 1→N 一控多铺路）。
     # 放 core（不依赖 QWidget）—— 与 net/HostServer 配对；也便于日后单独单测。
     net/ClientConnection.cpp
@@ -81,9 +85,15 @@ add_library(lanrdp_core STATIC
     # 放 core 才能被 test_sessionstore 直链 —— 落盘逻辑最需要单测，
     # 却又最容易被"只能从 UI 走一遍"挡在门外。
     app/SessionStore.cpp
+    # 开机自启（当前用户 Run 键）。只碰 QtCore，放 core 让 test_autostart 直链
+    # —— 注册表写入失败时不会抛异常，只会「看起来记住了」。
+    app/AutoStart.cpp
     # 窗口标题与任务栏角标的判据。纯函数、只依赖 QString，放 core 是为了能
     # 直接单测：「本机此刻是否正在被看」不允许靠肉眼看窗口去验证。
     app/WindowStatus.cpp
+    # 质量读数与一句话诊断（纯函数）。判定门槛最该有断言 —— 它会误报，
+    # 而误报的代价是用户从此无视这个读数。
+    app/QualityReport.cpp
     # 单实例协调（QLocalServer 命名管道，fail-open）。只依赖 QtNetwork，
     # 放 core 让 test_singleinstance 直链。
     app/SingleInstance.cpp
@@ -494,6 +504,13 @@ lanrdp_add_test(test_sessionstore
     LABELS "unit"
 )
 
+# 开机自启（HKCU 的 Run 值）。键路径可注入 —— 用例写进
+# `HKCU\Software\lanrdp-test\Run`，绝不碰用户真实的自启列表。
+lanrdp_add_test(test_autostart
+    SOURCES tests/test_autostart.cpp
+    LABELS "unit"
+)
+
 # 命令行参数解析（app/CliArgs.cpp）。从前这批分支全在 main() 里，
 # 而 main.cpp 带 main() 没法链进测试目标 ⇒ 未知参数 / 缺取值 / 数字非法 / 动作互斥
 # 全都没有断言。⚠️ 不进 lanrdp_core：它属于应用层，core 不该知道 CLI 的形状。
@@ -518,6 +535,27 @@ lanrdp_add_test(test_connectionhints
 lanrdp_add_test(test_lanaddresses
     SOURCES tests/test_lanaddresses.cpp common/LanAddresses.cpp
     LABELS "unit"
+)
+
+# 往返时间（SIO_TCP_INFO）。这条断言守的是「本机 API 能不能用」这个假设：
+# 它静默失效时界面只会显示「往返 —」，看起来像没有数据，而不是像探针坏了。
+lanrdp_add_test(test_tcprtt
+    SOURCES tests/test_tcprtt.cpp
+    LABELS "unit"
+)
+
+# 质量读数 / 一句话诊断：门槛与优先级（网络先于解码）、缺读数不报警、
+# 静止画面不算「没画面」。
+lanrdp_add_test(test_qualityreport
+    SOURCES tests/test_qualityreport.cpp
+    LABELS "unit"
+)
+
+# 局域网自动发现：报文编解码 + 两个实例互见 / 不认自己 / 过期下线。
+# 只绑系统分配端口、目标指向 127.0.0.1，绝不往真实局域网里发包。
+lanrdp_add_test(test_discovery
+    SOURCES tests/test_discovery.cpp
+    LABELS "net"
 )
 
 # Phase 18：多视窗网格 —— 布局纯函数（1×1 / 1×2 / 左大右两小 / 2×2）

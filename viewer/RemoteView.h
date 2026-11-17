@@ -4,6 +4,8 @@
 
 #include <memory>
 
+class QAction;
+class QMenu;
 class QToolButton;
 
 namespace lanrdp {
@@ -56,7 +58,18 @@ public:
     // 「已连 N 个」是唯一的例外：它是**全局**被控状态，显隐由 MainWindow 按监听状态刷。
     QToolButton *clientListButton() const { return clientListButton_; }
     QToolButton *connectButton() const { return connectButton_; }
+    // 剪贴板里有文件等着发时，这颗按钮分两段：**主体**点一下 = 把那批发到这一格，
+    // **右侧小三角**弹菜单（里面只有一项「选择文件…」）。没有待发文件时小三角不出现，
+    // 点主体就是挑一个文件 —— 与「剪贴板直传」这项功能出现之前一模一样。
+    //
+    // 为什么要分两段：两种发送的代价差得远（前者是「我刚复制的那批」，后者要现挑），
+    // 但它们共用一个图标。挤在同一颗按钮上的话，待发状态下「挑文件」这个入口就没了。
     QToolButton *sendFileButton() const { return sendFileButton_; }
+
+    // 剪贴板里有 N 个文件等着发。按钮据此换图形颜色与悬停提示 —— 条上没有文字，
+    // 状态只能落在图形上。0 = 回到「选文件发送」的常态。
+    void setClipboardFilesPending(int count);
+    int  clipboardFilesPending() const { return clipboardPending_; }
     QToolButton *disconnectButton() const { return disconnectButton_; }
     QToolButton *releaseTokenButton() const { return releaseTokenButton_; }
 
@@ -144,6 +157,10 @@ signals:
     // 那由「没占满」这条前提保证）。
     void restoreRequested(RemoteView *self);
 
+    // 【发送文件】右侧小三角里那项「选择文件…」被点了：这一格要**现挑**一个文件发。
+    // 承载信号的目的是让「挑文件的对话框」仍留在上层 —— 本类不弹任何对话框。
+    void pickFileRequested(RemoteView *self);
+
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -161,6 +178,9 @@ private:
     // 按 maximized_ 刷那颗图标按钮（图形 + 悬停提示 + 无障碍名字）。
     // 创建时和状态切换时都走它 —— 两处的说明文字才不会各写一份、各自走样。
     void refreshMaximizeButton();
+    // 【发送文件】的图形与提示随「剪贴板里有没有待发的文件」走，
+    // 换主题、换语言、待发数变化都重跑这一个函数。
+    void refreshSendFileButton();
 
     // 同上三条，对应 tokenState_。
     void refreshTokenStatus();
@@ -172,7 +192,12 @@ private:
     QToolButton *clientListButton_   = nullptr;  // 「已连 N 个」（条上最左，监听中才显示）
     QToolButton *maximizeButton_     = nullptr;  // 占满 / 还原
     QToolButton *connectButton_      = nullptr;  // 连接另一台（只加一格空视窗）
-    QToolButton *sendFileButton_     = nullptr;  // 发送文件…
+    QToolButton *sendFileButton_     = nullptr;  // 发送文件…（待发时右侧带小三角）
+    // 【发送文件】小三角里那项「选择文件…」。只在有待发文件时才挂到按钮上，
+    // 平时 menu 为空 —— 小三角是「多出了一种发法」的提示，不该常驻。
+    QMenu       *sendFileMenu_       = nullptr;
+    QAction     *pickFileAction_     = nullptr;
+    int          clipboardPending_   = 0;        // 待发文件数（>0 时按钮变强调色）
     QToolButton *disconnectButton_   = nullptr;  // 断开
     QToolButton *retryButton_        = nullptr;  // 重连
     QToolButton *closeCellButton_    = nullptr;  // 关闭

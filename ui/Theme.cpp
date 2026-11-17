@@ -272,6 +272,29 @@ QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled { color: %8; }
        c.surface.name(), c.textPrimary.name(), c.accent.name(),
        c.onAccent.name(), c.textMuted.name());
 
+    // ③b 自动发现列表（【新连接…】顶部那块）。
+    //     外观与输入框同族：它在语义上就是「拿来填进上面那几个框」的东西，
+    //     长成另一种样子会让人以为它是另一类操作。
+    //     ⚠️ 选中态必须写成 `::item:selected` 并**显式给背景**：只要给 `::item`
+    //     设了 padding / border-radius，这一格就改由样式表画，`selection-*`
+    //     那两个属性只剩文字那半边管用 —— 字变白、底不变。深色主题的底本来就深，
+    //     白字看着没事；浅色主题的底是白的，白字压上去等于消失。
+    ss += QStringLiteral(R"(
+QListWidget#peerList {
+    background: %1;
+    color: %2;
+    border: 1px solid %3;
+    border-radius: 5px;
+    padding: 2px;
+    selection-background-color: %4;
+    selection-color: %5;
+}
+QListWidget#peerList::item { padding: 4px 6px; border-radius: 4px; }
+QListWidget#peerList::item:hover { background: %6; }
+QListWidget#peerList::item:selected { background: %4; color: %5; }
+)").arg(c.surface.name(), c.textPrimary.name(), c.border.name(),
+       c.accent.name(), c.onAccent.name(), c.surfaceHover.name());
+
     // ④ 按钮（含对话框里的默认按钮）
     ss += QStringLiteral(R"(
 QPushButton {
@@ -362,6 +385,22 @@ QToolButton:hover {
 }
 QToolButton:pressed { background: %4; }
 QToolButton:disabled { color: %5; }
+
+/* 【发送文件】待发时右侧多出来的那颗小三角。箭头本身由 style 按 palette 画
+   （QSS 的 menu-arrow 只认位图，我们没有 qrc），这里只管「让它自成一块」：
+   一道分隔线就够让人看出按钮右边还有一块可点，不必去赌箭头在当前主题下的深浅。 */
+QToolButton::menu-button {
+    border: none;
+    border-left: 1px solid %2;
+    width: 13px;
+}
+/* 那一块是**贴着按钮右边缘**画的，会压掉常规的右 padding（8px < 14px），
+   于是分隔线正好压在图标右边沿上。挂了小三角时把右侧让出来，图标随之左移，
+   两者各占一块、互不重叠。宽度必须跟着一起加 —— 只挪位置不加宽的话，
+   内容区被压窄，图标会被挤到左边沿。 */
+QToolButton[menuArrow="true"] {
+    padding-right: 22px;
+}
 
 QLabel#overlayTitle { color: %1; font-weight: bold; }
 

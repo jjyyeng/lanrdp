@@ -29,4 +29,17 @@ QString lanAddressSummary(const QStringList &addresses);
 // QClipboard 的行为不可靠，而这段文本的正确性比「能不能复制」更值得钉。
 QString connectionCardText(const QStringList &addresses, quint16 port);
 
+// 邀请串：对方拿着它就能把【新连接…】的三个框填对。
+//
+// 三行固定按 地址 / 端口 / 口令 排列，与对话框里从上到下的次序一致 ——
+// 抄的时候不会串行，也不必猜哪一段是什么。
+//
+// 口令为空时**不留空行**（省掉口令那一行）：一段写着「口令」却什么都没有的文本，
+// 会让人以为口令本来就可以空着，而空口令在对端几乎必被拒。
+// 一个地址都没有时返回空串 —— 交给调用方把按钮禁掉，而不是产出一段残缺文本。
+//
+// 拼接放在这里而不是对话框里，理由同 connectionCardText：能脱离剪贴板单测
+//（offscreen 平台上 QClipboard 不可靠）。
+QString inviteText(const QStringList &addresses, quint16 port, const QString &password);
+
 } // namespace lanrdp

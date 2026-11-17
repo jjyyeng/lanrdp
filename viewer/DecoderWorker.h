@@ -77,6 +77,14 @@ public:
     int width() const;
     int height() const;
 
+    // 最近一段时间的**平均解码耗时**（毫秒/帧，含解码后的色彩转换与缩放）。
+    // 还没有成功解出过任何一帧时返回 -1 —— 「没测到」不能用 0 冒充，
+    // 0 在界面上看起来像「解码不耗时」，那是相反的结论。
+    //
+    // 给的是指数滑动平均：单帧耗时抖动很大（关键帧与 P 帧差一个量级），
+    // 而 HUD 每秒读一次，直接读原始值只会跳个不停。
+    double averageDecodeMs() const;
+
     // 显示预算 —— 线程安全入队，在工作线程里转发给解码器。
     // **可以在 start() 之前调**（此时只记值，run() 建好解码器后补发）。
     void setOutputSize(const QSize &size);
@@ -132,6 +140,10 @@ private:
     bool  hasPendingOutput_ = false;
 
     bool stopping_ = false;
+
+    // 解码耗时的指数滑动平均（毫秒/帧）。-1 = 还没有样本。
+    // 由工作线程写、UI 线程读，与队列共用 mutex_。
+    double decodeMsAvg_ = -1.0;
 
     // ⚠️ 只在工作线程内创建 / 使用 / 析构
     std::unique_ptr<H264Decoder> decoder_;

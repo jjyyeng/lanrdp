@@ -513,7 +513,10 @@ void HostController::handleSessionFrame(Session *session, const Frame &frame)
 
     // 剪贴板 —— 只认「持有输入令牌」的那个控制端发来的内容。
     // 少了这道门，任何连上的控制端都能往机主剪贴板里塞东西。
-    if (frame.type == static_cast<std::uint8_t>(FrameType::ClipboardText)) {
+    // 文件清单（CLIPBOARD_FILES）同属剪贴板，同一道门：它决定「这批文件要不要
+    // 写进机主的剪贴板」，影响面不比文本小。
+    if (frame.type == static_cast<std::uint8_t>(FrameType::ClipboardText)
+        || frame.type == static_cast<std::uint8_t>(FrameType::ClipboardFiles)) {
         if (tokenGate_.holds(tokenOf(session)))
             emit clipboardFrameReceived(frame);
         return;

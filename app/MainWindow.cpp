@@ -14,6 +14,7 @@
 
 #include "app/MainWindow.h"
 
+#include "app/AutoStart.h"
 #include "app/Dialogs.h"
 #include "ui/Glyph.h"
 #include "app/SingleInstance.h"
@@ -24,6 +25,7 @@
 #include "host/HostController.h"
 #include "net/ClientConnection.h"
 #include "net/ClipboardSync.h"
+#include "net/Discovery.h"
 #include "net/FileReceiver.h"
 #include "net/HostServer.h"
 #include "net/Session.h"
@@ -176,7 +178,7 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         peerPort_     = peer.port;
         peerPassword_ = peer.password;
 
-        // 四项行为偏好。没存过（首启 / 老版本 ini）就保持成员自己的默认值 ——
+        // 五项行为偏好。没存过（首启 / 老版本 ini）就保持成员自己的默认值 ——
         // 这正是三态读取的用处：「没存过」不能与「明确关掉了」混为一谈。
         // 只读进成员，平台动作留给下面 tray_ 建好之后（构造后半段）。
         if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appAutoReconnectKey()))
@@ -187,6 +189,16 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
             trayResident_ = *on;
         if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appSingleInstanceKey()))
             singleInstance_ = *on;
+        if (const auto on = sessionStore_.loadAppSwitch(lanrdp::appAutoStartKey()))
+            autoStartOn_ = *on;
+
+        // 自启项**跟着配置文件走**：配置文件不是默认那一份（单测传进来的临时 ini）时
+        // 写测试键 —— 否则跑一次界面测试就往用户真实的自启列表里塞一条测试 exe，
+        // 而且没人会注意到。
+        autoStart_ = std::make_unique<lanrdp::AutoStart>(
+            sessionStore_.filePath() == lanrdp::defaultSessionFilePath()
+                ? lanrdp::AutoStart::defaultRunKeyPath()
+                : lanrdp::AutoStart::testRunKeyPath());
     }
 
     // 界面语言必须在 buildUi() **之前**装好 —— 之后创建的每个控件都是按当时的
@@ -219,7 +231,8 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     // 远端时才给它挂上一条。这样「没连过」就是「没有连接对象」，不必再维护一个
     // 「连接对象存在但其实空闲」的中间态。
     buildUi();          // 建视窗 + 接线（含每格的条上控件与网格选中）
-    setupClipboard();   // 剪贴板同步（仅文本）
+    setupClipboard();   // 剪贴板同步（文本 + 文件清单）
+    setupDiscovery();   // 局域网自动发现（UDP 广播；失败只记日志）
 
     // ---- 任务栏角标 ----
     // 窗口最小化、或者被别的窗口挡住时，机主还能看到的只剩任务栏按钮 ——
@@ -339,6 +352,10 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
                     log(QStringLiteral("文件接收失败：%1").arg(message));
                     setStatusText(tr("文件接收失败"));
                 }
+                // 对方「复制文件」那一批的每个成员都从这里过：成功的攒起来，
+                // 凑齐了由剪贴板同步器一次写进本机剪贴板（失败即整批放弃）。
+                if (clipboardSync_)
+                    clipboardSync_->noteReceivedFile(ok ? path : QString());
                 emit fileReceived(ok, path, message);
             });
 
@@ -370,6 +387,34 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         // 「日志写不进去」这件事不能只写进那份写不进去的日志 —— 必须走**看得见**的通道。
         setStatusText(tr("日志写不进文件（不影响使用）：%1")
                           .arg(logPort_->logFilePath()));
+    }
+
+    // 开机后自动开始等待连接：先校正系统里那条命令，再按偏好决定要不要监听。
+    if (autoStart_) {
+        if (autoStartOn_) {
+            // 校正必须**每次都做**：Run 键存的是绝对路径，程序目录一搬（这个项目最常见
+            // 的部署方式就是整个目录拷来拷去）旧值就指向不存在的文件，症状是「明明开着
+            // 却再也没自启过」，而系统不会给任何提示。
+            autoStart_->refresh(QCoreApplication::applicationFilePath());
+        } else if (autoStart_->isEnabled()) {
+            // 开关关着、系统里却还留着一条（上次写成功了，之后 ini 被重置或换了配置）：
+            // 以开关为准删掉。留着就是「明明关了，下次开机它自己又起来了」——
+            // 那种不一致用户查不出来，只会觉得程序不听话。
+            QString ignored;
+            autoStart_->setEnabled(false, QString(), &ignored);
+        }
+
+        if (autoStartOn_) {
+            if (hostPassword_.isEmpty()) {
+                // 口令是自动监听的前提。没存过（或换了 Windows 用户解不开）时自动
+                // 监听必然失败 —— 与其开机那一刻才暴露，不如现在就说清楚。
+                log(QStringLiteral("已勾选「开机后自动开始等待连接」，但没有已保存的口令 ⇒ 本次不自动开始监听"));
+                setStatusText(tr("已勾选开机自动等待连接，但还没有保存口令"));
+            } else {
+                log(QStringLiteral("按设置自动开始等待连接（端口 %1）").arg(hostPort_));
+                startHost(hostPort_, hostPassword_);
+            }
+        }
     }
 }
 
@@ -658,6 +703,10 @@ void MainWindow::wireView(lanrdp::RemoteView *v)
             [this, v] { disconnectView(v); });
     connect(v->sendFileButton(), &QToolButton::clicked, this,
             [this, v] { sendFileFrom(v); });
+    // 小三角里那项「选择文件…」：绕过「有待发就发那批」的分支，直接挑文件 ——
+    // 它存在的全部意义就是「我现在不想发剪贴板那批」。
+    connect(v, &lanrdp::RemoteView::pickFileRequested, this,
+            [this](lanrdp::RemoteView *which) { pickAndSendFile(which); });
     connect(v->releaseTokenButton(), &QToolButton::clicked, this, [this, v] {
         if (auto *c = connectionOf(v))
             c->releaseToken();
@@ -970,6 +1019,10 @@ void MainWindow::refreshViewUi()
         v->tokenStatusButton()->setVisible(live);
         v->releaseTokenButton()->setVisible(live);
         v->sendFileButton()->setVisible(live);
+        // 新出现的格子也要拿到当前状态：剪贴板里有待发文件时，这颗按钮是强调色。
+        v->setClipboardFilesPending(clipboardSync_
+                                        ? int(clipboardSync_->pendingLocalFiles().size())
+                                        : 0);
         // 【屏幕】= 被控端有多块屏时才出现。单屏被控端上它与没有这项功能时一模一样，
         // 窄格里也不会多挤掉一个按钮位置（一控多 2×2 时每格只有半个窗口宽）。
         {
@@ -1450,6 +1503,44 @@ void MainWindow::applySingleInstance(bool on)
     }
 }
 
+// 「开机后自动开始等待连接」：一个开关同时管系统 Run 键与「启动即监听」。
+//
+// 三种失败各有各的说法，不能糊成一句「设置失败」：
+// · 没有已保存的口令 —— 自动监听必然失败，而且要到下次开机才暴露 ⇒ **当场拒绝**，
+//   连 Run 键都不写（写了只让开机后白等一场）；
+// · 写注册表被拦 —— 回滚开关并说明原因。界面上勾着而实际什么都不会发生，
+//   是最坏的一种「看起来成功了」；
+// · 配置文件不可持久化（单测 / 程序化嵌入）—— 只改内存里的开关，一行注册表都不碰。
+void MainWindow::applyAutoStart(bool on)
+{
+    if (!autoStart_) {
+        autoStartOn_ = on;
+        return;
+    }
+
+    if (on && hostPassword_.isEmpty()) {
+        log(QStringLiteral("未开启「开机后自动开始等待连接」：还没有保存口令"));
+        setStatusText(tr("请先在【开始监听…】里保存口令，再开启这一项"));
+        return;
+    }
+
+    QString why;
+    if (!autoStart_->setEnabled(on, QCoreApplication::applicationFilePath(), &why)) {
+        log(QStringLiteral("⚠ 开机自启未能%1：%2")
+                .arg(on ? QStringLiteral("开启") : QStringLiteral("关闭"), why));
+        setStatusText(on ? tr("开机自启未能开启：%1").arg(why)
+                         : tr("开机自启未能关闭：%1").arg(why));
+        // 回滚到实际状态。`!on` 恰好就是原值 —— 只有「想改但没改成」才会走到这里。
+        autoStartOn_ = !on;
+        return;
+    }
+
+    autoStartOn_ = on;
+    persistAppSwitch(lanrdp::appAutoStartKey(), on);
+    log(on ? QStringLiteral("已开启：开机后自动开始等待连接")
+           : QStringLiteral("已关闭：开机后不再自动开始等待连接"));
+}
+
 // 勾一下就落盘。写失败只记日志 —— 开关当场已经生效，为一个「没记住」弹框打断
 // 用户不值当；但不留痕的话，下次启动「怎么又变回去了」就成了没法查的悬案。
 void MainWindow::persistAppSwitch(const QString &key, bool on)
@@ -1888,6 +1979,9 @@ void MainWindow::openConnectDialog()
     cfg.password = peerPassword_;
 
     lanrdp::ConnectDialog dlg(cfg, this);
+    // 自动发现：把当前已知的机器塞进列表；对话框开着的时候新发现的也会出现
+    //（exec() 跑的是事件循环，信号照样到）。口令仍然要手输 —— 广播里没有口令。
+    dlg.attachDiscovery(discovery_);
     if (dlg.exec() != QDialog::Accepted)
         return;
 
@@ -1918,6 +2012,7 @@ void MainWindow::openSettingsDialog()
     cfg.receiveAudio   = audioEnabled_;
     cfg.trayResident   = trayResident_;
     cfg.singleInstance = singleInstance_;
+    cfg.autoStart      = autoStartOn_;
     cfg.inputEnabled   = inputEnabled_;
 
     lanrdp::SettingsDialog dlg(cfg, this);
@@ -1953,6 +2048,9 @@ void MainWindow::applySettings(const lanrdp::SettingsDialog::Config &picked)
         applySingleInstance(picked.singleInstance);
         persistAppSwitch(lanrdp::appSingleInstanceKey(), picked.singleInstance);
     }
+    // 这一项**自己落盘**：写注册表失败时要回滚开关，落盘必须发生在「确实生效」之后。
+    if (picked.autoStart != autoStartOn_)
+        applyAutoStart(picked.autoStart);
 }
 
 // 把「启用远程键鼠控制」总开关注入到**每一格**（连接 + 渲染器）。
@@ -2517,6 +2615,40 @@ void MainWindow::sendFileFrom(lanrdp::RemoteView *view)
         return;
     }
 
+    // 剪贴板里有一批文件时，这颗按钮**主体**的语义就是「把那一批发到**这一格**」——
+    // 复制文件不会自动发（复制常常只是本机换个地方放），这里才是真正的出口。
+    // 目标由「点了哪一格」决定，不是「选中了哪一格」。
+    //
+    // 「现挑一个文件」仍然到得了：走这颗按钮右侧的小三角（那个入口直接调
+    // pickAndSendFile，不经过这里）。
+    const QStringList pending =
+        clipboardSync_ ? clipboardSync_->pendingLocalFiles() : QStringList{};
+    if (!pending.isEmpty()) {
+        if (!c->sendClipboardFiles(pending)) {
+            log(QStringLiteral("剪贴板里的文件没有发出去（原因见上一行）"));
+            return;
+        }
+        log(QStringLiteral("剪贴板里的 %1 个文件开始发往对方").arg(pending.size()));
+        setStatusText(tr("正在传输 %1 个文件").arg(pending.size()));
+        // 「待发」不清：剪贴板里还装着这批文件，按钮亮着才符合事实 ——
+        // 一控多时可以直接去点另一格，不必再复制一遍。
+        return;
+    }
+
+    pickAndSendFile(view);
+}
+
+// 弹文件选择框，把用户挑中的那一个文件发给这一格。
+// 与 sendFileFrom 分开是因为它还有第二个调用点（那颗按钮的小三角）——
+// 那里要的正是「不要管剪贴板里有什么，直接让我挑」。
+void MainWindow::pickAndSendFile(lanrdp::RemoteView *view)
+{
+    auto *c = connectionOf(view);
+    if (!c || !c->ready()) {
+        log(QStringLiteral("尚未连接到对端，先点「新连接…」再发文件"));
+        return;
+    }
+
     const QString path = QFileDialog::getOpenFileName(this, tr("选择要发送的文件"));
     if (path.isEmpty())
         return;
@@ -2556,6 +2688,10 @@ void MainWindow::startHost(quint16 port, const QString &password)
     }
     hostState_.listening = true;
 
+    // 开始广播自己的端口：同一局域网里的其他人打开【新连接…】就能直接看到这台。
+    if (discovery_)
+        discovery_->setAdvertisePort(hostPort_);
+
     updateConnectionUi();
 }
 
@@ -2570,6 +2706,10 @@ void MainWindow::stopHost()
 
     hostStopSync();
     hostState_.listening = false;
+
+    // 不再监听就闭嘴：继续广播会让别人看到一台点了连不上的机器。
+    if (discovery_)
+        discovery_->setAdvertisePort(0);
 
     statsMode_ = clientReady() ? QStringLiteral("client") : QString();
     refreshClientList();
@@ -2593,6 +2733,11 @@ void MainWindow::handleClientDisconnected(lanrdp::RemoteView *view)
     // 只有「换一台重连」时才清 —— 那是另一台机器，留着上一台的画面会误导
     // （见 startConnect 里的 clear()）。
     Q_UNUSED(view);
+
+    // 断线时正在凑的那批文件不可能到齐了 —— 就地放弃，别让状态栏永远停在
+    // 「正在接收」，也别在超时之后才给一句「有 N 个文件没有送达」。
+    if (clipboardSync_)
+        clipboardSync_->cancelIncomingFiles();
 
     // 状态栏统计口径：还有别格连着就继续按控制端算，否则退回被控端 / 清空。
     if (!clientReady()) {
@@ -2646,7 +2791,29 @@ void MainWindow::updateConnectionUi()
 }
 
 // ---------------------------------------------------------------------------
-// 剪贴板同步（仅文本）
+// 局域网自动发现
+// ---------------------------------------------------------------------------
+
+void MainWindow::setupDiscovery()
+{
+    discovery_ = new lanrdp::Discovery(this);
+
+    // 绑不上不是致命问题：端口被占 / 没网卡都只意味着「这次自动找不到」。
+    // 写日志而不是弹窗 —— 用户此刻想做的仍然是连一台机器，手输地址照样能用。
+    if (!discovery_->start()) {
+        log(QStringLiteral("局域网自动发现未能启动（%1）；可在【新连接…】里手动填写地址")
+                .arg(discovery_->lastError()));
+        return;
+    }
+
+    connect(discovery_, &lanrdp::Discovery::peersChanged, this, [this] {
+        const int count = discovery_->peers().size();
+        log(QStringLiteral("局域网内可连接的机器：%1 台").arg(count));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 剪贴板同步（文本 + 文件清单）
 // ---------------------------------------------------------------------------
 
 void MainWindow::setupClipboard()
@@ -2670,6 +2837,41 @@ void MainWindow::setupClipboard()
         log(QStringLiteral("剪贴板未同步：%1").arg(reason));
         setStatusText(tr("剪贴板未同步：%1").arg(reason));
     });
+
+    // ---- 文件（复制文件直传）----
+    // 复制**不自动发**：只把「剪贴板里有 N 个文件」这件事点亮到每一格的条上，
+    // 发给谁由用户点那一格的【发送文件】决定（复制文件常常只是本机换个地方放）。
+    connect(clipboardSync_, &lanrdp::ClipboardSync::pendingFilesChanged, this,
+            [this](const QStringList &paths) {
+                refreshClipboardFileButtons();
+                if (paths.isEmpty())
+                    return;
+                // 只有「连出去的那一端」才谈得上发送；被控端复制文件与本功能无关，
+                // 不该因此刷日志。
+                if (!clientReady())
+                    return;
+                log(QStringLiteral("剪贴板里有 %1 个文件，点悬浮条上的【发送文件】发给对方")
+                        .arg(paths.size()));
+                setStatusText(tr("剪贴板里有 %1 个文件，可以发给对方").arg(paths.size()));
+            });
+    connect(clipboardSync_, &lanrdp::ClipboardSync::filesIncoming, this,
+            [this](const QStringList &names) {
+                log(QStringLiteral("对方复制了 %1 个文件，正在接收").arg(names.size()));
+                setStatusText(tr("对方复制了 %1 个文件").arg(names.size()));
+            });
+    connect(clipboardSync_, &lanrdp::ClipboardSync::filesReceived, this,
+            [this](const QStringList &paths) {
+                log(QStringLiteral("%1 个文件已就绪，可直接粘贴").arg(paths.size()));
+                setStatusText(tr("%1 个文件已就绪，可直接粘贴").arg(paths.size()));
+            });
+}
+
+// 把「待发文件数」刷到每一格的条上（图形换色 + 换提示）。
+void MainWindow::refreshClipboardFileButtons()
+{
+    const int count = clipboardSync_ ? int(clipboardSync_->pendingLocalFiles().size()) : 0;
+    for (lanrdp::RemoteView *v : views_)
+        v->setClipboardFilesPending(count);
 }
 
 // 同步目标的选择规则：
@@ -2683,9 +2885,10 @@ void MainWindow::updateClipboardTarget()
         return;
 
     // 控制端这一路用**选中格**的会话（用户当下在看哪一台，剪贴板就往哪一台同步）。
+    lanrdp::ClientConnection *conn = activeConnection();
     lanrdp::Session *target = nullptr;
-    if (auto *c = activeConnection(); clientReady() && c && c->session())
-        target = c->session();
+    if (clientReady() && conn && conn->session())
+        target = conn->session();
     clipboardSync_->setSession(target);
 
     // 被控端这一路**不能**把持有者的 `Session *` 交给同步器 —— 那条 socket 归工作线程，
@@ -2698,6 +2901,9 @@ void MainWindow::updateClipboardTarget()
                                       Qt::QueuedConnection);
         });
     }
+
+    // 文件不走这里：发送目标是「用户点的那一格」而不是选中格，所以由
+    // sendFileFrom() 直接调那一格的连接（sendClipboardFiles），不经过同步器的通道。
 }
 
 void MainWindow::startConnect(const QString &host, quint16 port, const QString &password)
@@ -2782,10 +2988,32 @@ void MainWindow::updateStats()
     lastFrames_ = frames;
     lastBytes_  = bytes;
 
-    if (!changed)
-        return;
-
     const double mbps = static_cast<double>(deltaBytes) * 8.0 / 1e6;
+
+    // ---- 悬停读数：每秒都刷，与「这一秒有没有新帧」无关 ----
+    // 静止的桌面恰恰是最需要看「往返几毫秒」的时候：那时没有新帧，但连接一直好着。
+    // 只在有帧时才刷，读数会停在上一次有动作的时刻，看起来像冻住了。
+    lanrdp::QualitySample sample;
+    sample.frames  = frames;
+    sample.size    = lastFrameSize_;
+    sample.hosting = hosting;
+    sample.fps     = static_cast<double>(deltaFrames);
+    sample.mbps    = mbps;
+    if (!hosting && cc) {
+        sample.rttMs    = cc->rttMs();
+        sample.decodeMs = cc->decodeMs();
+    }
+    refreshQualityHud(sample);
+
+    const lanrdp::QualityVerdict verdict   = lanrdp::judgeQuality(sample);
+    const bool                   noteworthy =
+        verdict == lanrdp::QualityVerdict::NetworkSlow
+        || verdict == lanrdp::QualityVerdict::DecodeSlow;
+
+    // 没有新帧时**不重写**状态栏（静止桌面不该每秒把 fps 刷成 0，那是噪音）；
+    // 例外是诊断出了问题 —— 那时必须写出来：藏在悬停里的告警等于没有告警。
+    if (!changed && !noteworthy)
+        return;
 
     // 分辨率字样改由**帧自身上报**，不再取 renderer_->frameSize()。
     // 被控端的本机预览默认关闭，渲染器里没有帧，继续用老办法会让状态栏
@@ -2808,7 +3036,27 @@ void MainWindow::updateStats()
             text += tr("（失败 %1）").arg(failed);
     }
 
+    // 诊断不正常时补一句**短的**：状态栏这一行本来就长，说不清「为什么卡」；
+    // 但把结论完全藏进悬停，等于只有会悬停的人才知道出了问题。
+    if (noteworthy)
+        text += QStringLiteral(" | ") + lanrdp::qualityVerdictText(verdict);
+
     setStatusText(text);
+}
+
+// 状态栏的悬停读数。
+//
+// 为什么是悬停而不是常驻面板：这一行已经把「分辨率 / fps / Mbps / 累计」摆在
+// 明面上了，是**日常**该看的；往返与解码耗时是**排障**才看的，常驻会把
+// 「文案即说明」的克制破坏掉。
+//
+// 两处都挂：状态栏里那段文字（大家的鼠标本来就会停在那儿），以及状态栏的空白区。
+void MainWindow::refreshQualityHud(const lanrdp::QualitySample &sample)
+{
+    const QString hud = lanrdp::qualityHudText(sample);
+    if (statusLabel_)
+        statusLabel_->setToolTip(hud);
+    statusBar()->setToolTip(hud);
 }
 
 // ---------------------------------------------------------------------------

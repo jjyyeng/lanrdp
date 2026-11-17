@@ -7,10 +7,13 @@
 #include "viewer/ScreenOverlayBar.h"
 #include "viewer/ScreenRenderer.h"
 
+#include <QAction>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMouseEvent>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QToolButton>
 
@@ -50,7 +53,14 @@ RemoteView::RemoteView(QWidget *parent)
     retranslate();
 }
 
-RemoteView::~RemoteView() = default;   // connection_ 在此销毁（头文件里只有前向声明）
+RemoteView::~RemoteView()
+{
+    // 菜单没有父亲（条上不许有 QMenu 子对象），得自己收 ——
+    // 不然每开关一格就漏一个隐藏的顶层菜单。
+    if (sendFileButton_)
+        sendFileButton_->setMenu(nullptr);
+    delete sendFileMenu_;
+}
 
 void RemoteView::buildUi()
 {
@@ -137,6 +147,15 @@ void RemoteView::buildUi()
     sendFileButton_ = newBarButton(bar_, QString(), QStringLiteral("sendFileButton"));
     sendFileButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
     sendFileButton_->setIconSize(QSize(kBarIconSize, kBarIconSize));
+
+    // 小三角里那一项只在「剪贴板有待发文件」时挂上去（见 refreshSendFileButton）。
+    // ⚠️ 菜单**故意不认本类做父亲**：条上不许有任何菜单对象（右键在条上不该弹东西，
+    // 那条断言由 test_mainwindow_ui 守着）。QToolButton::setMenu 也不接管所有权，
+    // 所以它由本类析构时自己 delete。
+    sendFileMenu_   = new QMenu(nullptr);
+    pickFileAction_ = sendFileMenu_->addAction(QString());
+    connect(pickFileAction_, &QAction::triggered, this,
+            [this] { emit pickFileRequested(this); });
     row->addWidget(sendFileButton_);
 
     disconnectButton_ = newBarButton(bar_, QString(), QStringLiteral("disconnectButton"));
@@ -195,7 +214,7 @@ void RemoteView::applyTheme()
     if (screenButton_)
         screenButton_->setIcon(glyph::icon(glyph::Shape::Monitor, c.textPrimary));
     if (sendFileButton_)
-        sendFileButton_->setIcon(glyph::icon(glyph::Shape::SendFile, c.textPrimary));
+        refreshSendFileButton();
     if (disconnectButton_)
         disconnectButton_->setIcon(glyph::icon(glyph::Shape::Disconnect, c.danger));
     if (retryButton_)
@@ -231,12 +250,8 @@ void RemoteView::retranslate()
         screenButton_->setAccessibleName(tr("选择屏幕"));
         screenButton_->setToolTip(tr("选择要看的屏幕"));
     }
-    if (sendFileButton_) {
-        sendFileButton_->setAccessibleName(tr("发送文件"));
-        sendFileButton_->setToolTip(tr(
-            "向对方发送文件，文件将保存到对方的接收目录，完成后自动校验完整性。\n"
-            "也可以将文件拖入画面发送。"));
-    }
+    if (sendFileButton_)
+        refreshSendFileButton();
     if (disconnectButton_) {
         disconnectButton_->setAccessibleName(tr("断开"));
         disconnectButton_->setToolTip(tr(
@@ -299,6 +314,67 @@ void RemoteView::setMaximized(bool on)
         return;
     maximized_ = on;
     refreshMaximizeButton();
+}
+
+// 【发送文件】有三态：
+// 常态 —— 点它挑一个文件；
+// 有文件待发 —— 点它把那一批发到**这一格**，右侧多出一颗小三角（里面是「选择文件…」）；
+// 断线 —— 由上层禁用，这里不管。
+// 条上没有文字，所以状态只能落在图形颜色（强调色）、小三角与悬停提示上。
+//
+// ⚠️ 小三角是「这颗按钮现在有两种发法」的唯一提示，不能省：省掉之后用户在待发状态下
+// 就再也找不到「挑一个别的文件」这个入口了（这正是它最初被做坏的地方）。
+void RemoteView::setClipboardFilesPending(int count)
+{
+    const int clamped = qMax(0, count);
+    if (clamped == clipboardPending_)
+        return;
+    clipboardPending_ = clamped;
+    refreshSendFileButton();
+}
+
+void RemoteView::refreshSendFileButton()
+{
+    if (!sendFileButton_)
+        return;
+
+    const theme::Colors &c = theme::colors();
+    const bool pending = clipboardPending_ > 0;
+
+    sendFileButton_->setIcon(glyph::icon(glyph::Shape::SendFile,
+                                         pending ? c.accent : c.textPrimary));
+
+    if (pickFileAction_)
+        pickFileAction_->setText(tr("选择文件…"));
+
+    if (pending) {
+        // MenuButtonPopup：点主体照常发 clicked（= 发剪贴板那批），点小三角弹菜单。
+        sendFileButton_->setMenu(sendFileMenu_);
+        sendFileButton_->setPopupMode(QToolButton::MenuButtonPopup);
+        sendFileButton_->setAccessibleName(tr("发送剪贴板里的文件"));
+        sendFileButton_->setToolTip(tr("发送剪贴板里的 %1 个文件（发到这台电脑）\n"
+                                       "复制文件不会自动发出去，点这里才发。\n"
+                                       "右侧小三角里可以改为挑选其他文件。")
+                                        .arg(clipboardPending_));
+    } else {
+        // 没有待发文件时不挂菜单：按钮立刻回到「点一下挑文件」的原样，
+        // 宽度也回到那颗小三角出现之前的尺寸（条上的按钮不该无缘无故变宽）。
+        sendFileButton_->setMenu(nullptr);
+        sendFileButton_->setPopupMode(QToolButton::DelayedPopup);
+        sendFileButton_->setAccessibleName(tr("发送文件"));
+        sendFileButton_->setToolTip(tr(
+            "向对方发送文件，文件将保存到对方的接收目录，完成后自动校验完整性。\n"
+            "也可以将文件拖入画面发送。"));
+    }
+
+    // 小三角那块贴着右边缘画，会压到图标上；挂了菜单时右侧要让出位置（见样式表）。
+    // 动态属性一变必须重新 polish，否则控件不会按新规则重算尺寸。
+    if (sendFileButton_->property("menuArrow").toBool() != pending) {
+        sendFileButton_->setProperty("menuArrow", pending);
+        sendFileButton_->style()->unpolish(sendFileButton_);
+        sendFileButton_->style()->polish(sendFileButton_);
+        sendFileButton_->updateGeometry();
+    }
 }
 
 // 状态跟着图标走：占满后箭头转成朝内收（这颗按钮现在是出口），

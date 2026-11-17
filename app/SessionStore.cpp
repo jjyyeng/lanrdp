@@ -233,6 +233,11 @@ QString appSingleInstanceKey()
     return QStringLiteral("app/singleInstance");
 }
 
+QString appAutoStartKey()
+{
+    return QStringLiteral("app/autoStart");
+}
+
 // 三态读。`nullopt` = 这个键**从没存过**（首次运行，或是升级前的老 ini）。
 //
 // `contains()` 是唯一能把「没存过」与「存了 false」分开的判据：`value(key).toBool()`

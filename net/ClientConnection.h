@@ -82,6 +82,18 @@ public:
     // 发送文件。未就绪 / 文件不可读返回 false（FileSender 会再 emit 一次 fileFinished(false,…)）。
     bool sendFile(const QString &path);
 
+    // 一批文件：**串行**发出（FileSender 一次只能传一个，撞上去会中止前一个）。
+    // 后进队的文件在前一个 fileFinished 之后才开传；任何一个失败都清空剩余队列
+    // —— 半批文件比明确失败更难解释（对端会一直等那几个永远不来的）。
+    // 返回 false 表示「一个都发不了」（未就绪 / 本端不可用）。
+    bool sendFiles(const QStringList &paths);
+
+    // 把本机剪贴板里的这批文件发过去：先一帧 CLIPBOARD_FILES（清单，对端据此
+    // 知道要凑几个），再把文件本身按 sendFiles 的规矩串行传。
+    // 超过上限 / 名字过长 / 一个都发不了时返回 false 并写一条日志（「为什么没发」
+    // 必须落到明面上，否则用户只看到按钮没反应）。
+    bool sendClipboardFiles(const QStringList &paths);
+
     // **下一次**文件传输会用的 id。取值从随机数起步、每次递增 —— 它只保证
     // 「同一连接内不重复」，不保证全局唯一（接收侧已按来源隔离，不再依赖这点）。
     // 暴露出来是为了让「下一笔是几号」可被日志与测试观察到。
@@ -181,6 +193,13 @@ public:
     quint64 framesReceived() const { return rxFrames_; }
     quint64 bytesReceived() const { return rxBytes_; }
 
+    // ---- 质量读数（状态栏悬停时显示的那几个数）----
+    // 解码耗时（毫秒/帧，含色彩转换）。裸帧路径没有解码器、或还没解出过任何一帧
+    // 时返回 -1 —— 「没有这个读数」与「耗时 0」是两件事，混在一起会给出相反的结论。
+    double decodeMs() const;
+    // 网络往返（毫秒）。问的是内核（TCP_INFO），未建会话 / 取不到时返回 -1。
+    int rttMs() const;
+
 signals:
     void logMessage(const QString &line);       // 所有日志（含诊断）；上层决定落盘/显示
     void statusMessage(const QString &text);    // 状态栏文案
@@ -216,6 +235,7 @@ private slots:
 private:
     void handleFrame(const Frame &frame);  // 收帧总入口（心跳 / 令牌 / 剪贴板 / 画面）
     void ensureFileSender();
+    void pumpFileQueue();
     void scheduleReconnect();
     void onSocketDisconnected();
 
@@ -273,6 +293,9 @@ private:
     qint64 pendingFrameBytes_ = 0;
 
     std::uint32_t nextTransferId_ = 1;
+
+    // 等着的文件（本地绝对路径）。队首是**正在传**的那一个之下的第一个。
+    QStringList   fileQueue_;
 };
 
 } // namespace lanrdp

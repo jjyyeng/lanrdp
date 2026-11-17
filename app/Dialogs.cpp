@@ -15,10 +15,15 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPointer>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVBoxLayout>
+
+#include "net/Discovery.h"
 
 namespace lanrdp {
 
@@ -199,6 +204,7 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     addressLayout->setSpacing(6);
 
     const QStringList localAddrs = lanAddresses();
+    lanAddresses_ = localAddrs;
     auto *addressLabel = new QLabel(lanAddressSummary(localAddrs), addressRow);
     addressLabel->setObjectName(QStringLiteral("lanAddressLabel"));
     addressLabel->setWordWrap(true);
@@ -246,6 +252,17 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("开始监听"));
     buttons->button(QDialogButtonBox::Cancel)->setText(tr("取消"));
+
+    // 【复制邀请串】放在按钮区左侧（ActionRole）：它不结束对话框，却是这个对话框
+    // 最常用的一步 —— 把地址、端口、口令一次抄给对方，省掉「先查 IP、再抄口令」。
+    //
+    // 与上面地址行那个【复制】分工：那边只复制「地址:端口」（可以发给任何人），
+    // 这边连口令一起复制（等于一次性把进门凭据交出去）。两件事刻意分成两个按钮。
+    invite_ = buttons->addButton(tr("复制邀请串"), QDialogButtonBox::ActionRole);
+    invite_->setObjectName(QStringLiteral("copyInviteButton"));
+    invite_->setToolTip(tr("复制「地址 / 端口 / 口令」三行，直接发给对方照填。"));
+    // 没有局域网地址时复制出来也没有意义（对面拿不到地址），与上面【复制】同口径。
+    invite_->setEnabled(!lanAddresses_.isEmpty());
     // 校验在 accept() 覆写里（唯一入口：点按钮和直接调 accept() 走同一条路）。
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -266,6 +283,7 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
         QGuiApplication::clipboard()->setText(
             connectionCardText(localAddrs, quint16(port_->value())));
     });
+    connect(invite_, &QPushButton::clicked, this, [this] { copyInvite(); });
 
     auto *box = new QVBoxLayout(this);
     box->addLayout(form);
@@ -283,6 +301,35 @@ HostConfigDialog::Config HostConfigDialog::config() const
     const int bps = bitrate_->currentData().toInt();
     c.bitrateBps  = bps > 0 ? bps : Config{}.bitrateBps;
     return c;
+}
+
+QString HostConfigDialog::inviteString() const
+{
+    return lanrdp::inviteText(lanAddresses_, quint16(port_->value()), password_->text());
+}
+
+// 邀请串里没有口令就只是一段「你能找到我，但进不来」的文字。与其复制一段
+// 看起来能用、实际连不上的东西，不如就地拦下 —— 复用口令那行红字，
+// 保住「同一个问题只在一处说明」的既有分工。
+void HostConfigDialog::copyInvite()
+{
+    if (!isValidPassword(password_->text())) {
+        passwordError_->setText(tr("先填好口令，邀请串里要带上它。"));
+        passwordError_->setVisible(true);
+        password_->setFocus();
+        return;
+    }
+    QGuiApplication::clipboard()->setText(inviteString());
+
+    // 复制是**静默**动作：剪贴板变了，界面上什么都不会动。按钮自己报一声，
+    // 否则用户会怀疑到底点没点上，然后连点好几下。
+    // 用 QPointer 而不是裸指针：反馈定时器可能在对话框关掉之后才到期。
+    invite_->setText(tr("已复制"));
+    QPointer<QPushButton> guard(invite_);
+    QTimer::singleShot(1200, this, [guard] {
+        if (guard)
+            guard->setText(tr("复制邀请串"));
+    });
 }
 
 // 口令不合规时不关窗口，并说明原因（对标同文件 ConnectDialog::accept()）。
@@ -360,9 +407,122 @@ ConnectDialog::ConnectDialog(const Config &initial, QWidget *parent)
         error_->setVisible(false);
     });
 
+    // ---- 自动发现：局域网里正在等人的机器 ----
+    // 默认**隐藏**：一台都还没发现时露一个空框，比没有这块更让人困惑。
+    peersLabel_ = new QLabel(tr("局域网内正在等人的电脑"), this);
+    peersLabel_->setObjectName(QStringLiteral("peerListHeader"));
+    peersLabel_->setVisible(false);
+
+    peers_ = new QListWidget(this);
+    peers_->setObjectName(QStringLiteral("peerList"));
+    peers_->setVisible(false);
+    peers_->setSelectionMode(QAbstractItemView::SingleSelection);
+    // 点一下就填：这条列表存在的意义就是省掉「去对方机器上问 IP」这一步，
+    // 还要双击才生效等于多一道没理由的门槛。
+    connect(peers_, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        if (!item)
+            return;
+        host_->setText(item->data(Qt::UserRole).toString());
+        port_->setValue(item->data(Qt::UserRole + 1).toInt());
+        error_->setVisible(false);
+        password_->setFocus();   // 地址填好了，下一步本来就是输口令
+    });
+
     auto *box = new QVBoxLayout(this);
+    box->addWidget(peersLabel_);
+    box->addWidget(peers_);
     box->addLayout(form);
     box->addWidget(buttons);
+}
+
+void ConnectDialog::attachDiscovery(Discovery *discovery)
+{
+    if (discovery_ == discovery)
+        return;
+    discovery_ = discovery;
+    if (discovery_) {
+        // this 作为上下文：对话框销毁时连接自动断开（Discovery 活得更久）。
+        connect(discovery_, &Discovery::peersChanged, this, &ConnectDialog::refreshPeers);
+    }
+    refreshPeers();
+}
+
+void ConnectDialog::refreshPeers()
+{
+    if (!peers_)
+        return;
+
+    // 一行 = **一台机器的一条路**（地址:端口 · 机器名）。地址是给程序用的、
+    // 名字是给人认的，分两行会把每条撑得又高又宽，一屏只看得到两台。
+    //
+    // 同一台机器接了 Wi-Fi 和网线时会有两行：两个地址都是能连过去的路，
+    // 而哪条通只有用户知道（有线接内网、无线接外网时常见），所以**全都列出来**，
+    // 点哪行就连哪个 IP。对齐用的键因此是「实例 + 地址」—— 按实例对齐会让
+    // 同一台机器的两行抢同一个条目对象，看着就是两行在互相覆盖。
+    constexpr int kAddressRole = Qt::UserRole;
+    constexpr int kPortRole    = Qt::UserRole + 1;
+    constexpr int kKeyRole     = Qt::UserRole + 2;
+
+    const QList<DiscoveredPeer> list =
+        discovery_ ? discovery_->peers() : QList<DiscoveredPeer>{};
+
+    // 摊平成「一行一个地址」，顺序由 Discovery 给（名字 → 地址），不在这里再排。
+    struct PeerRow
+    {
+        QString key;
+        QString address;
+        quint16 port = 0;
+        QString name;
+    };
+    QList<PeerRow> rows;
+    for (const DiscoveredPeer &peer : list) {
+        if (peer.addresses.isEmpty())
+            continue;   // 理论上不会：没有地址的条目不会进列表
+        for (const PeerAddress &entry : peer.addresses) {
+            const QString address = entry.address.toString();
+            rows.append(PeerRow{QStringLiteral("%1@%2").arg(peer.instanceId).arg(address),
+                                address, peer.port, peer.name});
+        }
+    }
+
+    // 增量更新：**不 clear() 重建**。一重建，选中项、悬停项、滚动位置全丢，
+    // 而且每次广播都闪一下，看着就是在抖。这里只改文本 / 挪位置 / 补缺 / 删多。
+    for (int row = 0; row < rows.size(); ++row) {
+        const PeerRow &peer = rows.at(row);
+
+        QListWidgetItem *item = nullptr;
+        for (int i = 0; i < peers_->count() && !item; ++i) {
+            if (peers_->item(i)->data(kKeyRole).toString() == peer.key)
+                item = peers_->item(i);
+        }
+        if (!item) {
+            item = new QListWidgetItem;
+            item->setData(kKeyRole, peer.key);
+        }
+
+        item->setText(peer.name.isEmpty()
+                          ? QStringLiteral("%1:%2").arg(peer.address).arg(peer.port)
+                          : QStringLiteral("%1:%2 · %3").arg(peer.address).arg(peer.port).arg(
+                                peer.name));
+        item->setData(kAddressRole, peer.address);
+        item->setData(kPortRole, int(peer.port));
+
+        const int current = peers_->row(item);
+        if (current != row) {
+            if (current >= 0)
+                peers_->takeItem(current);
+            peers_->insertItem(row, item);
+        }
+    }
+    while (peers_->count() > rows.size())
+        delete peers_->takeItem(peers_->count() - 1);
+
+    const int visibleRows = qMin(peers_->count(), 4);
+    peers_->setVisible(visibleRows > 0);
+    peersLabel_->setVisible(visibleRows > 0);
+    if (visibleRows > 0)
+        peers_->setFixedHeight(visibleRows * peers_->sizeHintForRow(0)
+                               + 2 * peers_->frameWidth());
 }
 
 ConnectDialog::Config ConnectDialog::config() const
@@ -401,35 +561,12 @@ void ConnectDialog::accept()
 // 【设置…】
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// 一个选项 = 复选框 + 紧跟一行灰字说明。
-//
-// 说明不塞进 tooltip：设置项的解释应当一眼可见，而不是等鼠标悬停才出现；
-// 也不写长句 —— 一行放得下才会被读。
-void addOption(QVBoxLayout *box, QCheckBox *check, const QString &hint, QWidget *parent)
-{
-    auto *item = new QVBoxLayout;
-    item->setContentsMargins(18, 0, 0, 6);   // 与复选框文字左对齐
-    item->setSpacing(1);
-    item->addWidget(check);
-
-    auto *label = new QLabel(hint, parent);
-    label->setObjectName(QStringLiteral("formHint"));
-    label->setWordWrap(true);
-    item->addWidget(label);
-
-    box->addLayout(item);
-}
-
-} // namespace
-
 SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle(tr("设置"));
-    // 与另两个对话框同宽：换成最长的说明时不会挤成两行，来回切换也不会跳。
-    setMinimumWidth(kDialogMinWidth);
+    // ⚠️ **不设**最小宽度：这里的每一行都很短（最长的是底部那句），硬撑到启动
+    // 对话框的 320 只会在右侧留一条空白。窗口宽度由布局自然算出 = 最长一行。
 
     autoReconnect_ = new QCheckBox(tr("断线自动重连"), this);
     autoReconnect_->setObjectName(QStringLiteral("autoReconnectCheck"));
@@ -447,6 +584,10 @@ SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     singleInstance_->setObjectName(QStringLiteral("singleInstanceCheck"));
     singleInstance_->setChecked(initial.singleInstance);
 
+    autoStart_ = new QCheckBox(tr("开机后自动开始等待连接"), this);
+    autoStart_->setObjectName(QStringLiteral("autoStartCheck"));
+    autoStart_->setChecked(initial.autoStart);
+
     input_ = new QCheckBox(tr("键鼠控制"), this);
     input_->setObjectName(QStringLiteral("inputCheck"));
     input_->setChecked(initial.inputEnabled);
@@ -457,17 +598,27 @@ SettingsDialog::SettingsDialog(const Config &initial, QWidget *parent)
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    // 只有「不记住」的那一项需要额外交代；其余四项不必逐条说，底部一句带过。
+    // 六个开关里只有「键鼠控制」不记住，这句是唯一必须留在界面上的说明 ——
+    // 它不是对某个选项的解释，而是对「例外」的声明：不说，用户会以为下次开程序
+    // 自己昨天勾过的操作权限还在。
     auto *footnote = new QLabel(tr("以上设置会自动保存，键鼠控制除外。"), this);
     footnote->setObjectName(QStringLiteral("formFootnote"));
-    footnote->setWordWrap(true);
+    // 不换行：换行会让人以为那是两段说明，也会让 QLabel 的 sizeHint 变得不可预测
+    // （窗口宽度要按「最长一行」算，就得让它老实报出这一行的真实宽度）。
+    footnote->setWordWrap(false);
 
     auto *box = new QVBoxLayout(this);
-    addOption(box, autoReconnect_, tr("断开后按 1–30 秒递增间隔重试"), this);
-    addOption(box, audio_, tr("只播当前选中画面的声音"), this);
-    addOption(box, tray_, tr("收进通知区域，程序继续运行"), this);
-    addOption(box, singleInstance_, tr("重复启动时叫回已有窗口"), this);
-    addOption(box, input_, tr("关闭后只能看，不能操作对方"), this);
+    // 每个开关后面**不再跟一行说明**：复选框上的文字本身就是说明
+    //（「断开后按 1–30 秒递增间隔重试」这种解释在勾选前没人看，勾选后也会让人
+    //  误以为那行是某个状态的实时描述）。真正需要交代的只有「哪一项不会被记住」，
+    // 那是底部那句，它留着的理由与上面相反 —— 它不是解释控件，是例外声明。
+    box->setSpacing(10);
+    box->addWidget(autoReconnect_);
+    box->addWidget(audio_);
+    box->addWidget(tray_);
+    box->addWidget(singleInstance_);
+    box->addWidget(autoStart_);
+    box->addWidget(input_);
     box->addSpacing(4);
     box->addWidget(footnote);
     box->addWidget(buttons);
@@ -480,6 +631,7 @@ SettingsDialog::Config SettingsDialog::config() const
     c.receiveAudio   = audio_->isChecked();
     c.trayResident   = tray_->isChecked();
     c.singleInstance = singleInstance_->isChecked();
+    c.autoStart      = autoStart_->isChecked();
     c.inputEnabled   = input_->isChecked();
     return c;
 }

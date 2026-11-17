@@ -16,9 +16,11 @@ constexpr std::uint16_t kMagic    = 0x4C52;
 // **v2 = 挑战-响应握手**（服务端先发 Challenge，客户端回 HMAC 响应）。
 // **v3 = CLIPBOARD_TEXT 去掉 4 字节 `seq` 头部**（载荷就是裸 UTF-8 文本）。
 // **v4 = 引入音频两帧**（AUDIO_CONFIG 17 / AUDIO_DATA 18，单向系统声音）。
+// **v5 = 多屏两帧**（SCREEN_LIST 19 / SCREEN_SELECT 20）。
+// **v6 = 剪贴板文件清单帧**（CLIPBOARD_FILES 21：一次复制里的文件名与个数）。
 // v1 的「客户端先发 sha256 摘要」流程已废弃且被拒（tryParse 对不上版本直接 Invalid）。
 // 单二进制双角色、两端同时更新 ⇒ 无兼容负担（同心跳帧：本就要求同版本）。
-constexpr std::uint8_t  kVersion  = 5;
+constexpr std::uint8_t  kVersion  = 6;
 
 // 帧头固定 8 字节：
 // Magic[2]='LR' | Version[1] | Type[1] | PayloadLen[4, little-endian]
@@ -71,6 +73,9 @@ enum class FrameType : std::uint8_t
     // 多屏（v5）：LIST 是状态、SELECT 是请求，语义见 protocol/ScreenControl.h。
     ScreenList         = 19, // 屏列表 + 当前在用哪块（被控端 → 控制端，唯一权威）
     ScreenSelect       = 20, // 请求切到第几块（控制端 → 被控端）
+    // 剪贴板文件（v6）：一次「复制文件」的清单，先于这批 FILE_* 到达。
+    // 接收侧靠它知道「这几个文件属于同一批，凑齐后写进剪贴板」。
+    ClipboardFiles     = 21,
 };
 
 // 从字节流前端解析一帧的结果

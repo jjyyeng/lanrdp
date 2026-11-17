@@ -11,12 +11,14 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -24,18 +26,22 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QToolButton>
+#include <QUdpSocket>
 
 #include <limits>
 
+#include "app/AutoStart.h"
 #include "app/Dialogs.h"
 #include "app/MainWindow.h"
 #include "app/SessionStore.h"
 #include "app/SingleInstance.h"
 #include "common/I18n.h"
+#include "common/LanAddresses.h"
 #include "ui/Theme.h"
 #include "app/WindowStatus.h"
 #include "net/Auth.h"
 #include "net/ClientConnection.h"
+#include "net/Discovery.h"
 #include "net/HostServer.h"
 #include "net/Session.h"
 #include "protocol/FileTransfer.h"
@@ -112,6 +118,8 @@ private slots:
 
     // 三个对话框
     void dialogsRoundTripTheirConfig();
+    void hostDialogCopiesAnInviteString();
+    void hostDialogRefusesTheInviteWithoutAPassword();
     void dialogsAreDarkToo();
     // 切到浅色之后新开的对话框也得是浅色（它们走的是同一份全局 QSS）
     void dialogsFollowTheLightTheme();
@@ -129,6 +137,10 @@ private slots:
     // 「连我」地址行（多网卡时选错地址是最典型的首连失败）
     void hostDialogShowsLanAddressCard();
     void connectDialogRejectsWeakPassword();
+    // 自动发现：列表默认隐藏；发现一台就露出来，点一下把地址与端口填好
+    void connectDialogListsDiscoveredPeers();
+    // 【发送文件】两态：剪贴板里有待发文件时换成强调色（条上没有文字）
+    void sendFileButtonShowsPendingClipboardFiles();
     // 地址为空与口令不合规是同一类事：提示必须是同一个位置的同一条红字
     void connectDialogRejectsEmptyAddressWithTheSameRedLabel();
     // 空态大图标要跟随屏幕 DPR 重画（跨缩放比屏拖动后不发糊）
@@ -148,6 +160,7 @@ private slots:
 
     // 状态栏差分基线必须绑定「统计来源」
     void statusBaselineResetsWhenSwitchingCells();
+    void qualityHudIsAttachedToTheStatusBar();
 
     // 基本界面结构
     void clearLogEmptiesBufferOnly();          // 清日志 = 清内存缓冲
@@ -182,6 +195,11 @@ private slots:
 
     // 四项跨会话行为偏好（自动重连 / 声音 / 托盘 / 单实例）：在对话框里改了就记住
     void remembersBehaviorSwitches();
+    // 「开机后自动开始等待连接」：一个开关同时管系统 Run 值与启动即监听
+    void autoStartWritesTheRunValueAndRemovesItAgain();
+    void autoStartIsRefusedWithoutASavedPassword();
+    void autoStartAlsoListensOnLaunch();
+    void staleRunValueIsClearedWhenTheSwitchIsOff();
 
     // 手工验证时发现的瑕疵：重连待命时点【断开】，界面没跟着复位
     void userDisconnectWhileReconnectPendingResetsUi();
@@ -984,6 +1002,39 @@ void TestMainWindowUi::statusBaselineResetsWhenSwitchingCells()
              qPrintable(QStringLiteral("换格后状态栏出现无符号回绕：") + status->text()));
 }
 
+// 状态栏那一行只放日常该看的「分辨率 / fps / Mbps」；「往返 / 解码耗时」是排障
+// 才看的，放在悬停提示里。这条用例守的是这两样真的接上了 —— 它们分别来自
+// 内核（TCP_INFO）和解码线程，任何一环断了，界面上只会安静地少一行。
+void TestMainWindowUi::qualityHudIsAttachedToTheStatusBar()
+{
+    MainWindow w(testLogPath());
+
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    QVERIFY(host.listen(0));
+    w.startConnect(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QTRY_VERIFY(w.clientReady());
+
+    auto *status = w.findChild<QLabel *>(QStringLiteral("statusLabel"));
+    QVERIFY2(status, "状态栏标签应当存在（objectName=statusLabel）");
+
+    // 统计定时器 1 s 一拍，第一拍只重建差分基线，第二拍才出读数。
+    QTRY_VERIFY_WITH_TIMEOUT(!status->toolTip().isEmpty(), 6000);
+
+    const QString hud = status->toolTip();
+    QVERIFY2(hud.contains(QStringLiteral("fps")), qPrintable(hud));
+    QVERIFY2(hud.contains(QStringLiteral("Mbps")), qPrintable(hud));
+    QVERIFY2(hud.contains(QStringLiteral("往返")), qPrintable(hud));
+    QVERIFY2(hud.contains(QStringLiteral("解码")), qPrintable(hud));
+    QVERIFY2(hud.contains(QStringLiteral("诊断")), qPrintable(hud));
+
+    // 回环连接上内核应当给得出 RTT：这一行显示「—」就说明取数那一段没接上。
+    QVERIFY2(!hud.contains(QStringLiteral("往返 —")),
+             qPrintable(QStringLiteral("回环连接却取不到往返时间：") + hud));
+
+    // 悬停在状态栏空白处也要出同一份（不然只有正好停在文字上才看得到）。
+    QVERIFY2(w.statusBar()->toolTip() == hud, "状态栏本身也该挂同一份读数");
+}
+
 // ---------------------------------------------------------------------------
 // 三个对话框
 // ---------------------------------------------------------------------------
@@ -1407,6 +1458,59 @@ void TestMainWindowUi::dialogsRoundTripTheirConfig()
     QVERIFY2(sc2.inputEnabled, "键鼠开关应当忠实反映入参");
 }
 
+// 邀请串是「照抄就能连上」的文本：三行分别对应【新连接…】的三个框，
+// 而且必须带口令 —— 不带口令的那份，对方抄完还是连不上。
+void TestMainWindowUi::hostDialogCopiesAnInviteString()
+{
+    if (lanrdp::lanAddresses().isEmpty())
+        QSKIP("本机没有局域网地址（邀请串为空的那条分支由 test_lanaddresses 覆盖）");
+
+    lanrdp::HostConfigDialog::Config hc;
+    hc.port     = 9002;
+    hc.password = QStringLiteral("secret");
+    lanrdp::HostConfigDialog dlg(hc);
+
+    const QString invite = dlg.inviteString();
+    QVERIFY2(invite.contains(QStringLiteral("9002")), qPrintable(invite));
+    QVERIFY2(invite.contains(QStringLiteral("secret")), qPrintable(invite));
+    QCOMPARE(invite.count(QLatin1Char('\n')), 2);   // 地址 / 端口 / 口令，正好三行
+    QVERIFY2(!invite.contains(QStringLiteral("127.0.0.1")),
+             "回环地址对方连不上，不该出现在邀请串里");
+
+    // 复制的是**此刻的输入**，不是构造时的值：改端口要立刻反映。
+    auto *portBox = dlg.findChild<QSpinBox *>(QStringLiteral("portEdit"));
+    QVERIFY(portBox);
+    portBox->setValue(9123);
+    QVERIFY2(dlg.inviteString().contains(QStringLiteral("9123")),
+             qPrintable(dlg.inviteString()));
+
+    // 复制本身是静默的，按钮必须自己报一声，否则用户会怀疑没点上而连点好几下。
+    auto *button = dlg.findChild<QPushButton *>(QStringLiteral("copyInviteButton"));
+    QVERIFY(button);
+    QCOMPARE(button->text(), QStringLiteral("复制邀请串"));
+    button->click();
+    QCOMPARE(button->text(), QStringLiteral("已复制"));
+}
+
+// 没有口令就不许复制：一段「地址 + 端口」但没有口令的文字，看着像能用，
+// 实际连不上 —— 那种假成功比直接拦下更难查。
+void TestMainWindowUi::hostDialogRefusesTheInviteWithoutAPassword()
+{
+    if (lanrdp::lanAddresses().isEmpty())
+        QSKIP("本机没有局域网地址（按钮此时整体禁用，另由复制地址那条覆盖）");
+
+    lanrdp::HostConfigDialog dlg({});   // 口令默认为空
+    auto *button = dlg.findChild<QPushButton *>(QStringLiteral("copyInviteButton"));
+    QVERIFY(button);
+    QVERIFY2(button->isEnabled(), "有局域网地址时这个按钮就该可用");
+
+    button->click();
+    QCOMPARE(button->text(), QStringLiteral("复制邀请串"));   // 没有「已复制」= 没复制
+    auto *error = dlg.findChild<QLabel *>(QStringLiteral("passwordErrorHint"));
+    QVERIFY(error);
+    QVERIFY2(!error->isHidden(), "应当就地把口令的问题说出来");
+}
+
 // 【设置…】是连接 / 窗口 / 控制这几项开关的**唯一**编辑处，且刻意**不含**
 // 端口 / 口令 / 接收目录 —— 那些属于「启动一次会话」的参数（在【开始监听…】里）。
 //
@@ -1416,7 +1520,7 @@ void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
 {
     lanrdp::SettingsDialog dlg({});
 
-    // 五项都要在。少一项的后果是「这个开关在界面上不存在」，比多一项严重得多。
+    // 六项都要在。少一项的后果是「这个开关在界面上不存在」，比多一项严重得多。
     struct Expect {
         const char *name;
         const char *what;
@@ -1427,6 +1531,7 @@ void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
         {"audioCheck", "接收对方声音", true},
         {"trayResidentCheck", "最小化到托盘", false},
         {"singleInstanceCheck", "同时只开一个窗口", false},
+        {"autoStartCheck", "开机后自动开始等待连接", false},
         {"inputCheck", "键鼠控制", false},
     };
 
@@ -1441,7 +1546,7 @@ void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
     // 这两条语义，不该替用户决定；而要开的人勾一次就会被记住。
     // 声音默认开 —— 默认关会变成「明明连着却听不见」这种无从解释的现象。
 
-    // 五项里只有「键鼠控制」不落盘，必须在界面上说清，否则用户会以为它也被记住了。
+    // 六项里只有「键鼠控制」不落盘，必须在界面上说清，否则用户会以为它也被记住了。
     auto *footnote = dlg.findChild<QLabel *>(QStringLiteral("formFootnote"));
     QVERIFY2(footnote, "要有一句总说明：哪些会被保存");
     QVERIFY2(footnote->text().contains(QStringLiteral("自动保存")),
@@ -1449,11 +1554,215 @@ void TestMainWindowUi::settingsDialogHoldsTheGlobalSwitches()
     QVERIFY2(footnote->text().contains(QStringLiteral("键鼠控制")),
              "总说明要点出唯一的例外是键鼠控制");
 
+    // 反证：每个开关后面**不许**再跟一行解释。复选框上的文字本身就是说明，
+    // 再补一句「断开后按 1–30 秒递增间隔重试」这类文字只会让六项变成十二行。
+    const auto hints = dlg.findChildren<QLabel *>(QStringLiteral("formHint"));
+    QVERIFY2(hints.isEmpty(),
+             qPrintable(QStringLiteral("【设置…】里又出现了逐项说明：%1")
+                            .arg(hints.isEmpty() ? QString() : hints.first()->text())));
+
     // 反证：启动参数不该出现在这里
     QVERIFY2(!dlg.findChild<QWidget *>(QStringLiteral("portEdit")),
              "端口属于【开始监听…】，不该在【设置…】里再放一份");
     QVERIFY2(!dlg.findChild<QWidget *>(QStringLiteral("recvDirEdit")),
              "接收目录属于【开始监听…】，不该在【设置…】里再放一份");
+
+    // 窗口宽度 = 最长一行，两头都不能歪：
+    // ① 不许靠自动换行把长句塞进窄窗口（会看成一分为二的两段话）；
+    // ② 不许反过来被一个固定的最小宽度撑出右侧空档。
+    // 必须真的 show 一次：不 show 的话布局不会给子控件算几何，读到的 height 是初值。
+    dlg.show();
+    QCoreApplication::processEvents();
+    dlg.adjustSize();
+    QCoreApplication::processEvents();
+    QVERIFY2(!footnote->wordWrap(),
+             "总说明要靠单行放下：宽度按最长一行算，不靠自动换行");
+    QVERIFY2(footnote->height() <= footnote->fontMetrics().height() * 3 / 2,
+             qPrintable(QStringLiteral("总说明被折行了（高 %1，行高 %2）")
+                            .arg(footnote->height())
+                            .arg(footnote->fontMetrics().height())));
+
+    int widest = footnote->sizeHint().width();
+    for (auto *b : dlg.findChildren<QAbstractButton *>())
+        widest = qMax(widest, b->sizeHint().width());
+    QVERIFY2(dlg.width() - widest <= 48,
+             qPrintable(QStringLiteral("【设置…】比最长一行宽了 %1 px（窗口 %2 / 最长 %3）")
+                            .arg(dlg.width() - widest)
+                            .arg(dlg.width())
+                            .arg(widest)));
+}
+
+// 自动发现要落到**能少打字**上：列表藏着一台看不见的机器等于没做；
+// 点一下不把地址端口填进去，等于让人照着抄。
+void TestMainWindowUi::connectDialogListsDiscoveredPeers()
+{
+    lanrdp::Discovery viewer;
+    QVERIFY(viewer.start(0));
+    QVERIFY(viewer.listenPort() != 0);
+
+    lanrdp::ConnectDialog dlg({});
+    dlg.attachDiscovery(&viewer);
+
+    auto *list = dlg.findChild<QListWidget *>(QStringLiteral("peerList"));
+    QVERIFY2(list, "【新连接…】应当有自动发现列表（objectName=peerList）");
+    // 一台都没发现时整块隐藏：露一个空框只会让人以为「这里本该有东西」
+    QVERIFY(list->isHidden());
+
+    // 造一台「正在监听」的机器：真广播、真收包 —— 打一个假信号证明不了链路是通的
+    lanrdp::Discovery host;
+    QVERIFY(host.start(0));
+    host.setBroadcastTargets({{QHostAddress::LocalHost, viewer.listenPort()}});
+    host.setAdvertisePort(9000);
+
+    QTRY_COMPARE_WITH_TIMEOUT(list->count(), 1, 3000);
+    QVERIFY(!list->isHidden());
+
+    // 一行显示「地址:端口 · 机器名」—— 换行会把每条撑高，一屏只看得到两台
+    const QString rowText = list->item(0)->text();
+    QVERIFY2(!rowText.contains(QLatin1Char('\n')), qPrintable(rowText));
+    QVERIFY2(rowText.contains(QStringLiteral("127.0.0.1:9000")), qPrintable(rowText));
+
+    // 增量刷新：再报几次变化，条目对象必须还是同一个 —— 换掉就等于整表重建，
+    // 选中项、悬停项、滚动位置全丢，看着就是在抖。
+    QListWidgetItem *before = list->item(0);
+    emit viewer.peersChanged();
+    emit viewer.peersChanged();
+    QCOMPARE(list->item(0), before);
+    QCOMPARE(list->count(), 1);
+
+    dlg.show();
+    QCoreApplication::processEvents();
+    const QRect rect = list->visualItemRect(list->item(0));
+    QVERIFY(!rect.isEmpty());
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, rect.center());
+
+    QCOMPARE(dlg.config().host, QStringLiteral("127.0.0.1"));
+    QCOMPARE(dlg.config().port, quint16(9000));
+
+    // 同一台机器的**第二条路**（Wi-Fi + 网线都连着）：应当多出**一行**，
+    // 而不是把原来那行的地址换掉 —— 两条路都可能通，而哪条通只有用户知道。
+    // 本机用 127.0.0.2 冒充第二块网卡；绑不上就跳过这段（不影响上面已验的部分）。
+    QUdpSocket secondPath;
+    if (secondPath.bind(QHostAddress(QStringLiteral("127.0.0.2")), 0)) {
+        lanrdp::Beacon beacon;
+        beacon.instanceId = host.instanceId();
+        beacon.port       = 9000;
+        beacon.name       = viewer.peers().first().name;
+        secondPath.writeDatagram(lanrdp::encodeBeacon(beacon), QHostAddress::LocalHost,
+                                 viewer.listenPort());
+
+        QTRY_COMPARE_WITH_TIMEOUT(list->count(), 2, 3000);
+        QVERIFY2(list->item(0)->text().contains(QStringLiteral("127.0.0.1")),
+                 qPrintable(list->item(0)->text()));
+        QVERIFY2(list->item(1)->text().contains(QStringLiteral("127.0.0.2")),
+                 qPrintable(list->item(1)->text()));
+        // 两行是同一台机器 —— 机器名都要在，用户才看得出这是「一台机器两个 IP」
+        QVERIFY2(list->item(1)->text().contains(beacon.name),
+                 qPrintable(list->item(1)->text()));
+
+        // 点第二行要填第二个地址：多列出来的那条路得真的能用，否则等于白列
+        QCoreApplication::processEvents();
+        const QRect second = list->visualItemRect(list->item(1));
+        QVERIFY(!second.isEmpty());
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, second.center());
+        QCOMPARE(dlg.config().host, QStringLiteral("127.0.0.2"));
+        QCOMPARE(dlg.config().port, quint16(9000));
+    }
+}
+
+// 【发送文件】两态：剪贴板里有一批文件等着发时，按钮换成强调色、提示改成
+// 「发送剪贴板里的 N 个文件」。条上没有文字，图形与提示就是唯一的状态出口 ——
+// 这两处任一不换，用户都不知道这颗按钮现在会发什么。
+void TestMainWindowUi::sendFileButtonShowsPendingClipboardFiles()
+{
+    lanrdp::RemoteView v;
+    QToolButton      *btn = v.sendFileButton();
+    QVERIFY(btn);
+
+    // 图标是现场绘制的 QPainterPath，颜色只能从像素上读回来 ——
+    // `QIcon::cacheKey()` 每次新建 QIcon 都会变，拿它比「颜色有没有变」是错的。
+    const auto dominantColor = [](const QIcon &icon) {
+        const QImage img = icon.pixmap(QSize(16, 16)).toImage().convertToFormat(
+            QImage::Format_ARGB32);
+        QHash<QRgb, int> histogram;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const QRgb pixel = img.pixel(x, y);
+                if (qAlpha(pixel) > 200)
+                    ++histogram[pixel];
+            }
+        }
+        QRgb best = 0;
+        int  bestCount = 0;
+        for (auto it = histogram.cbegin(); it != histogram.cend(); ++it) {
+            if (it.value() > bestCount) {
+                bestCount = it.value();
+                best      = it.key();
+            }
+        }
+        return best;
+    };
+
+    const QString idleTip = btn->toolTip();
+    QVERIFY2(idleTip.contains(QStringLiteral("发送文件")), qPrintable(idleTip));
+    const QRgb idleColor = dominantColor(btn->icon());
+    QVERIFY(idleColor != 0);
+
+    // 常态：不挂菜单 —— 按钮上不该平白多出一颗小三角，条上本来就挤。
+    QVERIFY2(!btn->menu(), "没有待发文件时【发送文件】不该挂菜单");
+    QVERIFY(btn->popupMode() != QToolButton::MenuButtonPopup);
+
+    // 给足宽度：条上十来颗按钮，窗口窄时布局会把它们一律压到同一尺寸，
+    // 那就量不出「这颗按钮多让出来的那一块」了。
+    v.resize(1200, 300);
+    v.show();
+    QCoreApplication::processEvents();
+    const int idleWidth = btn->width();
+    QVERIFY(idleWidth > 0);
+
+    v.setClipboardFilesPending(3);
+    QCoreApplication::processEvents();
+    QVERIFY2(btn->toolTip().contains(QStringLiteral("3")), qPrintable(btn->toolTip()));
+    QVERIFY2(dominantColor(btn->icon()) != idleColor,
+             "有文件待发时图形应当换成强调色");
+
+    // 小三角那一块贴着按钮右边缘画，会压到图标上（常规右 padding 只有 8px，
+    // 那块要 14px）。所以挂上菜单的同时按钮必须让出宽度，图标才不被压住。
+    // 注意量的得是 width 而不是 sizeHint：条上十来颗按钮，窗口窄时布局会把它们
+    // 一律压到同一尺寸，只看 sizeHint 会漏掉真实的挤压。
+    QVERIFY2(btn->width() >= idleWidth + 12,
+             qPrintable(QStringLiteral("小三角压住了图标：按钮宽度没让出位置（%1 → %2）")
+                            .arg(idleWidth)
+                            .arg(btn->width())));
+
+    // 有待发文件时，「现挑一个别的文件」这个入口必须还在 —— 它挂在右侧小三角里。
+    // 少了它，待发状态下这颗按钮就只会发剪贴板，`选择文件…` 无处可点。
+    QVERIFY2(btn->menu(), "有文件待发时按钮应当挂上菜单（否则「选择文件…」没地方点）");
+    QCOMPARE(btn->popupMode(), QToolButton::MenuButtonPopup);
+    QCOMPARE(btn->menu()->actions().size(), 1);
+    const QString pickText = btn->menu()->actions().first()->text();
+    QVERIFY2(pickText.contains(QStringLiteral("选择文件")), qPrintable(pickText));
+
+    // 点那一项要能冒到上层：对话框由 MainWindow 弹，本类不弹任何对话框。
+    int                 picked     = 0;
+    lanrdp::RemoteView *pickedView = nullptr;
+    QObject::connect(&v, &lanrdp::RemoteView::pickFileRequested,
+                     [&picked, &pickedView](lanrdp::RemoteView *self) {
+                         ++picked;
+                         pickedView = self;
+                     });
+    btn->menu()->actions().first()->trigger();
+    QCOMPARE(picked, 1);
+    QCOMPARE(pickedView, &v);
+
+    v.setClipboardFilesPending(0);
+    QCoreApplication::processEvents();
+    QCOMPARE(btn->toolTip(), idleTip);
+    QCOMPARE(dominantColor(btn->icon()), idleColor);
+    QVERIFY2(!btn->menu(), "待发清掉后小三角应当消失，按钮回到原样");
+    QVERIFY(btn->popupMode() != QToolButton::MenuButtonPopup);
+    QCOMPARE(btn->width(), idleWidth);   // 让出去的那块也要跟着收回来
+    v.hide();
 }
 
 // 码率上限三件事要同时成立：
@@ -2120,6 +2429,152 @@ void TestMainWindowUi::remembersBehaviorSwitches()
     }
 
     QVERIFY(!lanrdp::SingleInstanceGuard::notifyRunning(lanrdp::singleInstanceKey()));
+}
+
+namespace {
+
+// 自启项在测试里写进测试键 —— MainWindow 按「配置文件是不是默认那份」选键，
+// 这里传的是临时 ini，所以两边指向同一个键。
+void clearTestRunValue()
+{
+    QSettings settings(lanrdp::AutoStart::testRunKeyPath(), QSettings::NativeFormat);
+    settings.clear();
+    settings.sync();
+}
+
+QString testRunValue()
+{
+    return lanrdp::AutoStart(lanrdp::AutoStart::testRunKeyPath()).storedCommand();
+}
+
+} // namespace
+
+// 没口令就不许开：开了只会让下次开机白等一场，而失败要等到那一刻才暴露。
+void TestMainWindowUi::autoStartIsRefusedWithoutASavedPassword()
+{
+    clearTestRunValue();
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString ini = QDir(dir.path()).absoluteFilePath(QStringLiteral("session.ini"));
+
+    MainWindow w(testLogPath(), ini);
+    QVERIFY(!w.autoStartEnabled());
+
+    lanrdp::SettingsDialog::Config picked;
+    picked.autoStart = true;
+    w.applySettings(picked);
+
+    QVERIFY2(!w.autoStartEnabled(), "没有保存口令时不许登记开机自启");
+    QVERIFY2(testRunValue().isEmpty(), "被拒绝时连 Run 值都不该写");
+    clearTestRunValue();
+}
+
+// 开 ⇒ 系统里真有一条（带引号）；关 ⇒ 真的被删掉。跨会话要记住。
+void TestMainWindowUi::autoStartWritesTheRunValueAndRemovesItAgain()
+{
+    clearTestRunValue();
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString ini = QDir(dir.path()).absoluteFilePath(QStringLiteral("session.ini"));
+    const quint16 port = pickDeadPort();
+    QVERIFY(port != 0);
+
+    {
+        lanrdp::SessionStore store(ini);
+        lanrdp::HostSession host;
+        host.port     = port;
+        host.password = QStringLiteral("secret");
+        QVERIFY(store.saveHost(host));
+    }
+
+    {
+        MainWindow w(testLogPath(), ini);
+        QVERIFY(!w.autoStartEnabled());
+
+        lanrdp::SettingsDialog::Config picked;
+        picked.autoStart = true;
+        w.applySettings(picked);
+
+        QVERIFY2(w.autoStartEnabled(), "有口令时应当能开");
+        QVERIFY2(!testRunValue().isEmpty(), "勾了就必须在系统里留一条自启项");
+        QVERIFY2(testRunValue().contains(QLatin1Char('"')),
+                 "路径必须带引号，否则含空格时会被拆成两个参数");
+    }
+
+    {
+        MainWindow w(testLogPath(), ini);
+        QVERIFY2(w.autoStartEnabled(), "「开机后自动等待连接」应当被记住");
+
+        lanrdp::SettingsDialog::Config picked;
+        picked.autoStart = false;
+        w.applySettings(picked);
+
+        QVERIFY(!w.autoStartEnabled());
+        QVERIFY2(testRunValue().isEmpty(),
+                 "关掉后 Run 值必须真被删掉，否则下次开机它还会自己起来");
+    }
+
+    clearTestRunValue();
+}
+
+// 「启动即监听」：起窗口就开始监听，不必再点【开始监听…】。
+void TestMainWindowUi::autoStartAlsoListensOnLaunch()
+{
+    clearTestRunValue();
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString ini = QDir(dir.path()).absoluteFilePath(QStringLiteral("session.ini"));
+    const quint16 port = pickDeadPort();
+    QVERIFY(port != 0);
+
+    {
+        lanrdp::SessionStore store(ini);
+        lanrdp::HostSession host;
+        host.port     = port;
+        host.password = QStringLiteral("secret");
+        QVERIFY(store.saveHost(host));
+        QVERIFY(store.saveAppSwitch(lanrdp::appAutoStartKey(), true));
+    }
+
+    {
+        MainWindow w(testLogPath(), ini);
+        QVERIFY2(w.isHosting(), "勾了「开机后自动等待连接」，起窗口就该在监听");
+        w.stopHost();
+    }
+
+    // 关掉偏好之后，起窗口必须什么都不做（那才是默认行为）
+    {
+        lanrdp::SessionStore store(ini);
+        QVERIFY(store.saveAppSwitch(lanrdp::appAutoStartKey(), false));
+    }
+    {
+        MainWindow w(testLogPath(), ini);
+        QVERIFY2(!w.isHosting(), "没勾就不该自作主张开始监听");
+    }
+
+    clearTestRunValue();
+}
+
+// 开关关着、系统里却还留着一条（ini 被重置 / 手工加的）：启动时以开关为准删掉，
+// 否则用户会遇到「明明关了，下次开机它自己又起来了」—— 这种不一致他查不出来。
+void TestMainWindowUi::staleRunValueIsClearedWhenTheSwitchIsOff()
+{
+    clearTestRunValue();
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString ini = QDir(dir.path()).absoluteFilePath(QStringLiteral("session.ini"));
+
+    QString why;
+    QVERIFY2(lanrdp::AutoStart(lanrdp::AutoStart::testRunKeyPath())
+                 .setEnabled(true, QStringLiteral("D:/leftover/lanrdp.exe"), &why),
+             qPrintable(why));
+    QVERIFY(!testRunValue().isEmpty());
+
+    MainWindow w(testLogPath(), ini);   // ini 里没存过 appAutoStart ⇒ 默认关
+
+    QVERIFY(!w.autoStartEnabled());
+    QVERIFY2(testRunValue().isEmpty(), "开关关着就不该留着自启项");
+    clearTestRunValue();
 }
 
 // 连不上的时候也要排重连（否则「先开控制端、后开被控端」这种顺序就没法自动恢复）。

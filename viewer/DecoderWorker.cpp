@@ -119,10 +119,22 @@ void DecoderWorker::run()
             continue;
 
         QVector<QImage> images;
-        if (!decoder_->decodeFrame(frame, images)) {
+        QElapsedTimer   decodeTimer;
+        decodeTimer.start();
+        const bool decoded = decoder_->decodeFrame(frame, images);
+        if (!decoded) {
             // 坏帧 / 丢参帧很常见，不代表线程挂掉 —— 记录后继续等下个关键帧。
+            // 失败的一帧**不**计入耗时：它往往在解析参数集时就返回了，混进去会把
+            // 平均值往下拉，变成「越好越不耗时」的假象。
             emit decodeFailed(decoder_->lastError());
             continue;
+        }
+        {
+            // 计时口径 = 解码 + 色彩转换（缩放在转换里做）。后者才是大头，
+            // 只量解码器本身会得到一个「看起来很轻松」的数。
+            const double ms = static_cast<double>(decodeTimer.nsecsElapsed()) / 1e6;
+            QMutexLocker lock(&mutex_);
+            decodeMsAvg_ = decodeMsAvg_ < 0.0 ? ms : decodeMsAvg_ * 0.8 + ms * 0.2;
         }
 
         // 真尺寸取解码器报的码流尺寸 —— 缩放在解码器内部做掉了
@@ -199,6 +211,12 @@ int DecoderWorker::height() const
 {
     QMutexLocker lock(&mutex_);
     return openHeight_;
+}
+
+double DecoderWorker::averageDecodeMs() const
+{
+    QMutexLocker lock(&mutex_);
+    return decodeMsAvg_;
 }
 
 // ---------------------------------------------------------------------------

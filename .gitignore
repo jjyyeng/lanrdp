@@ -11,3 +11,6 @@ dist/
 
 # 测试生成的码流样本（仅用于人工查看，不入版本管理）
 h264_sample.264
+
+# 验收探针的本地构建产物（源码在 tools/keywatch/，编译命令见源码头）
+tools/keywatch/*.exe

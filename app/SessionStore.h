@@ -9,8 +9,9 @@ namespace lanrdp {
 // 会话启动参数与跨会话偏好的落盘。
 //
 // 一类是**启动一次会话要填的那几个字段**（端口 / 口令 / 地址 / 接收目录 / 编码），
-// 目的是「下次打开程序不用重填」；另一类是界面语言、外观与四项行为开关
-// （自动重连 / 接收声音 / 托盘 / 单实例），目的是「用户的选择不被重启抹掉」。
+// 目的是「下次打开程序不用重填」；另一类是界面语言、外观与五项行为开关
+// （自动重连 / 接收声音 / 托盘 / 单实例 / 开机后自动等待连接），
+// 目的是「用户的选择不被重启抹掉」。
 //
 // 口令**不以明文落盘**：写之前过 Windows DPAPI（`CryptProtectData`），与当前
 // Windows 用户绑定。要说实话 —— 它抬高的门槛只是「要解出来，得像这个用户一样
@@ -44,12 +45,16 @@ QString defaultSessionFilePath();
 QString protectSecret(const QString &plain);
 QString unprotectSecret(const QString &stored);
 
-// 四项行为开关的键名。**只在这里定义一次** —— 写错一个字符的症状是「设了但没生效」，
+// 五项行为开关的键名。**只在这里定义一次** —— 写错一个字符的症状是「设了但没生效」，
 // 编译期抓不到，因此不允许调用方各自字面量拼一遍。
 QString appAutoReconnectKey();
 QString appReceiveAudioKey();
 QString appTrayResidentKey();
 QString appSingleInstanceKey();
+// 「开机后自动开始等待连接」：一个开关同时管开机自启与启动即监听。
+// 两者分开没有任何价值 —— 不自启时「启动即监听」只是省一次点击，
+// 却会在双开 A/B 互连（本项目最常见的用法）时多一步去关。
+QString appAutoStartKey();
 
 // ini 的读写。
 //
@@ -87,15 +92,20 @@ public:
     QString loadUiTheme() const;
     bool saveUiTheme(const QString &key);
 
-    // ---- 四项行为开关（跨会话偏好，键见下面的 appXxxKey()）----
+    // ---- 五项行为开关（跨会话偏好，键见下面的 appXxxKey()）----
     //
     // 从前它们只活在本次运行里，理由是「跨会话保留会让『我明明关掉过』变成悬案」。
     // 那条理由只说对了一半：不保留同样是一种悬案 —— 「我明明开过，重启又回到关了」。
     // 记住用户的选择，两种悬案都不会发生。
     //
-    // 首启（这四项都没存过）仍是各自的默认值：托盘、单实例默认关，
-    // 自动重连与接收声音默认开。三态读取就是为了这件事 —— 「没存过」必须与
+    // 首启（这五项都没存过）仍是各自的默认值：托盘、单实例、开机后自动等待连接
+    // 默认关，自动重连与接收声音默认开。三态读取就是为了这件事 —— 「没存过」必须与
     // 「明确关掉了」分得开，否则用户永远回不到默认，程序也永远不知道该不该套默认值。
+    //
+    // ⚠️ 前四项都只是本程序内部状态；`appAutoStart` 不同 —— 它还对应系统里的
+    // 一条 Run 键（见 `app/AutoStart`）。**开关为真而 Run 键写失败**是可能的
+    // （安全软件拦截），那时必须把开关回滚并说明原因，否则界面上「开着」而实际
+    // 什么都不会发生。
     std::optional<bool> loadAppSwitch(const QString &key) const;
     bool saveAppSwitch(const QString &key, bool value);
 

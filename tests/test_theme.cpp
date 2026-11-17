@@ -1,7 +1,9 @@
 #include <QtTest/QtTest>
 
 #include <QApplication>
+#include <QHash>
 #include <QImage>
+#include <QListWidget>
 #include <QPalette>
 #include <QStyle>
 
@@ -44,6 +46,53 @@ QString describe(const QColor &c)
     return c.name(QColor::HexRgb);
 }
 
+// 量一行的**真实像素**：出现最多的颜色是底，与底反差最大的那个是字。
+// 读 palette 会得到「配好了」的假象 —— QSS 一旦接管 item 的绘制，
+// `selection-*` 那两个属性就不再落到文字上，而 palette 里照样是对的。
+struct RowLook
+{
+    QColor bg;
+    QColor fg;
+    double ratio = 0.0;
+};
+
+RowLook measureRow(QListWidget &list, int row)
+{
+    const QRect area = list.visualItemRect(list.item(row));
+    const QImage img = list.grab().toImage();
+
+    QHash<QRgb, int> hist;
+    for (int y = area.top(); y <= area.bottom(); ++y) {
+        for (int x = area.left(); x <= area.right(); ++x) {
+            if (img.rect().contains(x, y))
+                ++hist[img.pixel(x, y)];
+        }
+    }
+
+    QRgb  bgPixel = 0xFFFFFFFF;
+    int   bgCount = -1;
+    for (auto it = hist.cbegin(); it != hist.cend(); ++it) {
+        if (it.value() > bgCount) {
+            bgCount = it.value();
+            bgPixel = it.key();
+        }
+    }
+
+    const QColor bg(bgPixel);
+    RowLook     look;
+    look.bg = bg;
+    look.fg = bg;
+    for (auto it = hist.cbegin(); it != hist.cend(); ++it) {
+        const QColor c(it.key());
+        const double ratio = contrastRatio(c, bg);
+        if (ratio > look.ratio) {
+            look.ratio = ratio;
+            look.fg    = c;
+        }
+    }
+    return look;
+}
+
 } // namespace
 
 class TestTheme : public QObject
@@ -61,6 +110,9 @@ private slots:
     void applyInstallsFusionAndPalette();
     void switchingModeSwapsEverythingButTheStyle();
     void styleSheetsUseThePalette();
+
+    // 自动发现列表的**选中行**：选中了却读不出来，比没选中更糟
+    void peerListSelectionStaysReadable();
 
     // 矢量图标：任何尺寸 / 任何 DPI 都要出图，而且图上得真有墨
     void glyphsDrawAtEverySize();
@@ -309,6 +361,61 @@ void TestTheme::styleSheetsUseThePalette()
         // 危险色（【断开】）现在落在**图标**上而不是样式表里 —— QSS 的 color 管不到
         // QIcon，那条规则只会让人误以为颜色是从这儿来的。守它的是
         // `test_mainwindow_ui::disconnectButtonStartsDisabled`（比对图标实色）。
+    }
+}
+
+// 选中一行是**整块反色**：底换强调色、字换 onAccent。这条不会自动成立 ——
+// `#peerList::item` 一旦被 QSS 接管（padding / border-radius 就会触发），
+// `selection-background-color` / `selection-color` 就管不到文字了：底照样变蓝，
+// 字还是正文色。深色主题的正文本来就是浅的，看着正常；浅色主题的近黑字压在
+// #2563EB 上只剩 3:1 —— 那就是「选中后 IP 反色、看不清」。
+void TestTheme::peerListSelectionStaysReadable()
+{
+    constexpr double kMinRatio = 4.5;
+
+    for (lanrdp::theme::Mode mode : {lanrdp::theme::Mode::Dark, lanrdp::theme::Mode::Light}) {
+        lanrdp::theme::setMode(mode);
+        lanrdp::theme::apply(*qApp);
+        const auto &c = lanrdp::theme::colors();
+
+        QListWidget list;
+        list.setObjectName(QStringLiteral("peerList"));
+        list.resize(320, 100);
+        list.addItem(QStringLiteral("192.168.1.5:9000 · PC"));
+        list.addItem(QStringLiteral("10.0.0.7:9000 · LAPTOP"));
+        list.setCurrentRow(0);
+        // 真要让它走一次真实布局与 polish，但别真的弹到屏幕上。
+        list.setAttribute(Qt::WA_DontShowOnScreen, true);
+        list.show();
+        QCoreApplication::processEvents();
+
+        const RowLook sel = measureRow(list, 0);
+        const QString what =
+            QStringLiteral("%1主题 · 选中行：底 %2、字 %3，只有 %4:1")
+                .arg(mode == lanrdp::theme::Mode::Dark ? QStringLiteral("深色")
+                                                       : QStringLiteral("浅色"),
+                     describe(sel.bg), describe(sel.fg))
+                .arg(sel.ratio, 0, 'f', 2);
+
+        // ① 选中态得真画成强调色底（不然这条用例量的是「根本没选中」）
+        const int dr = qAbs(sel.bg.red() - c.accent.red());
+        const int dg = qAbs(sel.bg.green() - c.accent.green());
+        const int db = qAbs(sel.bg.blue() - c.accent.blue());
+        QVERIFY2(dr <= 24 && dg <= 24 && db <= 24,
+                 qPrintable(what + QStringLiteral("；底色不是强调色 %1，选中态没画出来")
+                                        .arg(describe(c.accent))));
+
+        // ② 字必须站得住
+        QVERIFY2(sel.ratio >= kMinRatio,
+                 qPrintable(what + QStringLiteral("；够不上 %1:1，选中后读不出来").arg(kMinRatio)));
+
+        // ③ 文字色应当就是 onAccent（不是碰巧撞上的别的色）
+        const int fr = qAbs(sel.fg.red() - c.onAccent.red());
+        const int fg_ = qAbs(sel.fg.green() - c.onAccent.green());
+        const int fb = qAbs(sel.fg.blue() - c.onAccent.blue());
+        QVERIFY2(fr <= 32 && fg_ <= 32 && fb <= 32,
+                 qPrintable(what + QStringLiteral("；文字不是 onAccent %1")
+                                        .arg(describe(c.onAccent))));
     }
 }
 

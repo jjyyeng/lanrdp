@@ -4,11 +4,14 @@
 #include "net/Auth.h"
 #include "net/FileSender.h"
 #include "net/Session.h"
+#include "net/TcpRtt.h"
+#include "protocol/Clipboard.h"
 #include "protocol/H264Frame.h"
 #include "protocol/ScreenFrame.h"
 #include "viewer/DecoderWorker.h"
 
 #include <QDateTime>
+#include <QFileInfo>
 #include <QImage>
 #include <QNetworkProxy>
 #include <QRandomGenerator>
@@ -248,6 +251,7 @@ void ClientConnection::teardown()
     screenList_    = lanrdp::ScreenList();
 
     // 发送器绑定在旧的 session 上，必须先中止并销毁
+    fileQueue_.clear();   // 换一台机器后，上一批没发完的文件不该继续发过去
     if (fileSender_) {
         fileSender_->abort();
         delete fileSender_;
@@ -410,6 +414,16 @@ void ClientConnection::ensureFileSender()
     connect(fileSender_, &FileSender::finished, this,
             [this](bool ok, const QString &path, const QString &message) {
                 emit fileFinished(ok, path, message);
+                if (ok) {
+                    pumpFileQueue();   // 上一份传完了，接着传队列里的下一份
+                    return;
+                }
+                // 一份失败就整批放弃：对端按清单等文件，缺一个就永远等不齐。
+                if (!fileQueue_.isEmpty()) {
+                    emit logMessage(QStringLiteral("已放弃队列中剩余的 %1 个文件")
+                                        .arg(fileQueue_.size()));
+                }
+                fileQueue_.clear();
             });
 }
 
@@ -432,6 +446,13 @@ bool ClientConnection::selectScreen(int index)
 
 bool ClientConnection::sendFile(const QString &path)
 {
+    return sendFiles(QStringList{path});
+}
+
+bool ClientConnection::sendFiles(const QStringList &paths)
+{
+    if (paths.isEmpty())
+        return false;
     if (!session_ || !ready_)
         return false;
 
@@ -439,7 +460,63 @@ bool ClientConnection::sendFile(const QString &path)
     if (!fileSender_)
         return false;
 
-    return fileSender_->start(path, nextTransferId_++);
+    fileQueue_.append(paths);
+    pumpFileQueue();
+    return true;
+}
+
+bool ClientConnection::sendClipboardFiles(const QStringList &paths)
+{
+    if (paths.isEmpty())
+        return false;
+    if (!session_ || !ready_) {
+        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：当前没有连接"));
+        return false;
+    }
+
+    if (paths.size() > kClipboardMaxFiles) {
+        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：一次最多 %1 个，这次有 %2 个")
+                            .arg(kClipboardMaxFiles)
+                            .arg(paths.size()));
+        return false;
+    }
+
+    QStringList names;
+    names.reserve(paths.size());
+    for (const QString &path : paths)
+        names.append(QFileInfo(path).fileName());
+
+    const auto payload = encodeClipboardFiles(names);
+    if (!payload) {
+        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：这批文件名过长或为空"));
+        return false;
+    }
+
+    // 顺序要紧：清单先走（TCP 有序），对端先知道「要凑几个」，再收文件。
+    Frame manifest;
+    manifest.type    = static_cast<std::uint8_t>(FrameType::ClipboardFiles);
+    manifest.payload = *payload;
+    session_->sendFrame(manifest);
+
+    if (!sendFiles(paths)) {
+        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：本端文件通道不可用"));
+        return false;
+    }
+    return true;
+}
+
+void ClientConnection::pumpFileQueue()
+{
+    if (!fileSender_ || fileQueue_.isEmpty())
+        return;
+    if (fileSender_->busy())
+        return;   // 上一份还在传：它的 finished 会再叫一次
+
+    const QString next = fileQueue_.takeFirst();
+    if (!fileSender_->start(next, nextTransferId_++)) {
+        // start() 自己已经 conclude 过（会 emit fileFinished(false)），失败即整批放弃。
+        fileQueue_.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,8 +563,9 @@ void ClientConnection::handleFrame(const Frame &frame)
         return;
     }
 
-    // 剪贴板（仅文本）—— 交给上层的同步器处理
-    if (type == static_cast<std::uint8_t>(FrameType::ClipboardText)) {
+    // 剪贴板（文本 / 文件清单）—— 交给上层的同步器处理
+    if (type == static_cast<std::uint8_t>(FrameType::ClipboardText)
+        || type == static_cast<std::uint8_t>(FrameType::ClipboardFiles)) {
         emit clipboardReceived(frame);
         return;
     }
@@ -753,6 +831,22 @@ void ClientConnection::onReconnectTimeout()
     // keepBackoff=true：**保留**退避计数，让下一轮的延迟真的往上涨
     //（connectTo 只在「用户发起」时清零；握手成功后也会归零）。
     connectTo(lastHost_, lastPort_, lastPassword_, /*keepBackoff=*/true);
+}
+
+double ClientConnection::decodeMs() const
+{
+    // 裸帧路径没有解码器（画面是现成的 ARGB），此时「解码耗时」这项读数没有意义，
+    // 一并报 -1 让上层直接省掉那一行，而不是显示一个 0.0。
+    return decoder_ ? decoder_->averageDecodeMs() : -1.0;
+}
+
+int ClientConnection::rttMs() const
+{
+    if (!session_)
+        return -1;
+    // 直接问内核，不做缓存：这个读数只有 HUD 每秒取一次，多一层缓存就多一处
+    // 能与真实值不同步的地方（而它恰恰是用来判断「现在卡不卡」的）。
+    return queryTcpRttMs(session_->socket()->socketDescriptor());
 }
 
 } // namespace lanrdp

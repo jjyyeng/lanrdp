@@ -4,16 +4,20 @@
 
 #include <QDialog>
 #include <QString>
+#include <QStringList>
 
 class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QPushButton;
 class QSpinBox;
 
 namespace lanrdp {
 
 class PasswordEdit;
+class Discovery;
 
 // 口令默认**留空**，由用户当场输入：一条公开写在源码里的出厂口令等于没设。
 // 长度与字符集的规则在 app/PasswordPolicy.h（唯一判定口）。
@@ -59,6 +63,13 @@ public:
     // 只在 exec() 返回 Accepted 之后读才有意义。
     Config config() const;
 
+    // 【复制邀请串】要复制的内容：地址 / 端口 / 口令 三行（拼接规则见
+    // common/LanAddresses.h::inviteText）。**按当前输入框的实时值**算。
+    //
+    // 公开出来是为了能脱离剪贴板断言 —— offscreen 平台上 QClipboard 不可靠，
+    // 而这段文本对不对，比「能不能复制」更值得钉。
+    QString inviteString() const;
+
     // 口令不合规（空 / 太短 / 含非 ASCII）时**不关窗口**，在口令框下方说明原因。
     // 空口令尤其要拦：两端 sha256("") 一致，握手**会通过** —— 那不是「连不上」，
     // 而是「谁都能连」，被控端会退化成没有凭据的远程键鼠服务。
@@ -68,12 +79,18 @@ public:
     void accept() override;
 
 private:
+    // 口令不合规就不复制：邀请串的核心是口令，缺了它对方拿到文本照样连不上。
+    void copyInvite();
+
     QSpinBox  *port_          = nullptr;
     PasswordEdit *password_   = nullptr;
     QLabel    *passwordError_ = nullptr;
     QLineEdit *recvDir_       = nullptr;
     QCheckBox *h264_          = nullptr;
     QComboBox *bitrate_       = nullptr;
+    QPushButton *invite_      = nullptr;
+    // 构造时枚举一次：邀请串里的地址行用它，按钮可用性也用它。
+    QStringList lanAddresses_;
 };
 
 // 【新连接…】：控制端连接参数。
@@ -92,6 +109,11 @@ public:
 
     Config config() const;
 
+    // 挂上自动发现：对话框打开期间新发现的机器会实时出现在顶部列表里。
+    // 传 nullptr / 一条都没有 → 整块列表隐藏（不留一个空框占地方）。
+    // ⚠️ 只填空地址与端口：口令永远要人手输 —— 广播里没有口令（也不该有）。
+    void attachDiscovery(Discovery *discovery);
+
     // 地址为空 / 口令不合规时都不关窗口（关了也必然连不上，不如当场说清楚）。
     // 口令规则与被控端相同（`app/PasswordPolicy.h`）—— 两端同版本时，短口令
     // 在对端也一定会被拒，所以本地先拦下省一次无用的连接尝试。
@@ -103,17 +125,24 @@ public:
     void accept() override;
 
 private:
+    void refreshPeers();
+
     QLineEdit *host_     = nullptr;
     QSpinBox  *port_     = nullptr;
     PasswordEdit *password_   = nullptr;
     // 地址为空 / 口令不合规共用**同一条**红字：两类错误都是「这一栏没填对」，
     // 用两套提示（一个改 placeholder、一个常驻红字）会让人以为是两种不同的问题。
     QLabel    *error_    = nullptr;
+
+    // ---- 自动发现（顶部那一块）----
+    QLabel      *peersLabel_ = nullptr;
+    QListWidget *peers_      = nullptr;
+    Discovery   *discovery_  = nullptr;   // 不拥有
 };
 
 // 【设置…】：连接、窗口与控制选项的唯一编辑处。
 //
-// 其中四项会被记住（落盘在 `app/` 下）；「键鼠控制」每次启动都要重新开启 ——
+// 其中五项会被记住（落盘在 `app/` 下）；「键鼠控制」每次启动都要重新开启 ——
 // 那是把本机操作发到别人机器上的能力，不该默认继承上一次的同意。
 class SettingsDialog : public QDialog
 {
@@ -125,6 +154,9 @@ public:
         bool receiveAudio   = true;   // 接收对方声音
         bool trayResident   = false;  // 最小化到托盘
         bool singleInstance = false;  // 同时只开一个窗口
+        // 开机自启 + 启动即监听合成一个开关：两者分开没有价值 —— 不自启时
+        // 「启动即监听」只是省一次点击，却会在双开 A/B 互连时多一步去关。
+        bool autoStart      = false;
         bool inputEnabled   = false;  // 键鼠控制（仅本次运行）
     };
 
@@ -137,6 +169,7 @@ private:
     QCheckBox *audio_          = nullptr;
     QCheckBox *tray_           = nullptr;
     QCheckBox *singleInstance_ = nullptr;
+    QCheckBox *autoStart_      = nullptr;
     QCheckBox *input_          = nullptr;
 };
 

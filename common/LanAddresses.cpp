@@ -87,4 +87,19 @@ QString connectionCardText(const QStringList &addresses, quint16 port)
     return lines.join(QLatin1Char('\n'));
 }
 
+QString inviteText(const QStringList &addresses, quint16 port, const QString &password)
+{
+    if (addresses.isEmpty())
+        return QString();
+
+    // 自由函数的文案不会被 lupdate 自动收走，必须写成带 "lanrdp" 上下文的字面量。
+    QStringList lines;
+    lines << QCoreApplication::translate("lanrdp", "地址 %1")
+                 .arg(addresses.join(QStringLiteral("、")));
+    lines << QCoreApplication::translate("lanrdp", "端口 %1").arg(port);
+    if (!password.isEmpty())
+        lines << QCoreApplication::translate("lanrdp", "口令 %1").arg(password);
+    return lines.join(QLatin1Char('\n'));
+}
+
 } // namespace lanrdp

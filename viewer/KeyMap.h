@@ -30,7 +30,7 @@ struct KeyMapping
 //
 // ⚠️ 左右分不出来是 `nativeVirtualKey()` 的锅：真键盘按下左 Ctrl 与右 Ctrl，
 //    `nativeVirtualKey()` **都**是 0x0011（Alt 都是 0x0012、Win 都是 0x005B），
-//    拿它判左右永远判不出来（实测，见 doc/HANDOFF.md §6.2.26）。
+//    拿它判左右永远判不出来（实测）。
 //    可靠信号只有 `nativeScanCode()`：右侧 Ctrl / Alt / Win 带 0xE0 前缀。
 //
 // 右侧的处理方式（均经实机注入验证）：

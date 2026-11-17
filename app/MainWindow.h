@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Dialogs.h"
+#include "app/QualityReport.h"
 #include "common/I18n.h"
 #include "common/LogPort.h"
 #include "app/SessionStore.h"
@@ -32,8 +33,10 @@ class QToolButton;   // onClientListMenu 的锚点按钮
 namespace lanrdp {
 class AudioPlayer;
 class AuthClient;
+class AutoStart;
 class ClientConnection;
 class ClipboardSync;
+class Discovery;
 class FileReceiver;
 class FileSender;
 class H264Decoder;
@@ -138,9 +141,10 @@ public:
     bool receiveAudioEnabled() const { return audioEnabled_; }
     void setReceiveAudioEnabled(bool on);
 
-    // 托盘常驻 / 单实例的当前值（同类查询，界面与测试都用它判断）。
+    // 托盘常驻 / 单实例 / 开机后自动等待连接的当前值（同类查询，界面与测试都用它判断）。
     bool trayResidentEnabled() const { return trayResident_; }
     bool singleInstanceEnabled() const { return singleInstance_; }
+    bool autoStartEnabled() const { return autoStartOn_; }
 
     // 把一份【设置…】结果整体应用（当场生效 + 落盘）。对话框点【确定】走的就是它，
     // 自测与单测也用它 —— 免得测试去弹模态框。
@@ -206,6 +210,9 @@ private slots:
     void onClientListMenu(QToolButton *anchor);  // 条上「已连 N 个」的弹出菜单（踢出 / 收回操作权）
     void updateStats();
 
+    // 把这一次的读数挂到状态栏的悬停提示上（见 updateStats 里的调用点）。
+    void refreshQualityHud(const lanrdp::QualitySample &sample);
+
     // 网格里选中格变了 -> 更新每格的选中外观与条标题。
     // 注意它**不**改任何连接：选中只是「接下来的操作发给谁」。
     void onGridSelectionChanged(int index);
@@ -224,6 +231,12 @@ private slots:
     // 会被探测到并退出，同时把本窗口叫到前台；关掉时交出监听名。
     // 监听建不起来只记一行日志，程序照常运行（fail-open）。
     void applySingleInstance(bool on);
+
+    // 「开机后自动开始等待连接」的开关（唯一编辑处是【设置…】）。
+    // 一个开关管两件事：系统里的 Run 键，和「启动时要不要自动开始监听」。
+    // ⚠️ 没有已保存口令时**不开启**：那只会让下次开机白等一场，而失败直到
+    // 开机那一刻才暴露。写注册表失败时回滚开关并说明原因（不能「勾着却没生效」）。
+    void applyAutoStart(bool on);
 
     // 把主窗口带回前台并给焦点。托盘双击与单实例唤醒共用：藏在托盘里、
     // 还在任务栏上、被别的窗口压住，都要能被这一下救回来。
@@ -373,9 +386,12 @@ private:
     bool hostStartSync(quint16 port, const QString &password);
     void hostStopSync();
 
-    // 剪贴板同步（仅文本）。单实例 + 动态切换同步目标。
+    // 剪贴板同步（文本 + 文件清单）。单实例 + 动态切换同步目标。
     void setupClipboard();
     void updateClipboardTarget();
+
+    // 局域网自动发现（UDP 广播）。只在监听期间广播自己。
+    void setupDiscovery();
 
     // 三个对话框的入口（都被「是否已有会话」决定要不要先切模式）。
     void openHostConfigDialog();
@@ -386,7 +402,12 @@ private:
     // 无参的槽（onDisconnectButtonClicked / onSendFileClicked）保留给程序化入口与测试，
     // 内部就是转调选中格。
     void disconnectView(lanrdp::RemoteView *view);
+    // 【发送文件】主体：有待发剪贴板文件就发那批，否则等同于 pickAndSendFile。
     void sendFileFrom(lanrdp::RemoteView *view);
+    // 【发送文件】右侧小三角里那项：不管剪贴板里有什么，直接弹选择框挑一个文件。
+    void pickAndSendFile(lanrdp::RemoteView *view);
+    // 把「剪贴板里有几个待发文件」刷到每一格的条上（图形换色 + 换提示）。
+    void refreshClipboardFileButtons();
 
     // 断线格的两个出口（条上的【重连】/【关闭】）。
     // · retryView = 用记下的参数立刻再连一次（转发给 ClientConnection::reconnectNow）；
@@ -476,7 +497,17 @@ private:
     std::unique_ptr<lanrdp::SingleInstanceGuard> singleGuard_;
     bool singleInstance_ = false;
 
+    // 开机自启。只在**配置文件可用**时才创建 —— 不持久化（单测 / 程序化嵌入）时
+    // 连对象都不建，一行注册表都不碰。
+    std::unique_ptr<lanrdp::AutoStart> autoStart_;
+    // 【设置…】里「开机后自动开始等待连接」的当前值（`app/autoStart`）。
+    bool autoStartOn_ = false;
+
     lanrdp::ClipboardSync *clipboardSync_ = nullptr;  // 单实例剪贴板同步（绑 QClipboard）
+
+    // 局域网自动发现。全程存在（收包），只在监听期间广播自己的 TCP 端口。
+    // 找不到不是错误：防火墙挡广播很常见，手输 IP 一样能连。
+    lanrdp::Discovery *discovery_ = nullptr;
 
     // 音频播放（对方的声音）。**单实例**：只有选中格那一格出声，
     // 所以不必每格一个播放器（每格一个会各自抢一块设备，反而要自己做混音）。

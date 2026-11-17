@@ -33,6 +33,7 @@ private slots:
     void stopJoinsThreadCleanly();
     void queuedFramesArriveInOrder();
     void readyTimeoutLeavesStateForRealResult();
+    void decodeTimingIsMeasured();
 };
 
 namespace {
@@ -344,6 +345,34 @@ void TestDecoderWorker::readyTimeoutLeavesStateForRealResult()
         QVERIFY2(worker.isReady(), "线程真正就绪后，先前那次超时不得留下「没就绪」的闩锁");
         worker.stop();
     }
+}
+
+// 质量读数里的「解码耗时」。它必须真的量到东西（> 0），且没样本时是 -1 ——
+// 这两条一起才排得掉「永远显示 0 ms」这种看着最舒服、实际最没用的实现。
+void TestDecoderWorker::decodeTimingIsMeasured()
+{
+    StreamLibrary lib;
+    if (!lib.build())
+        QSKIP("Media Foundation H.264 编解码不可用（无 MFT / Windows N），跳过");
+
+    auto *worker = new lanrdp::DecoderWorker(kWidth, kHeight, this);
+    worker->start();
+    QVERIFY2(worker->waitReady(), qPrintable(worker->lastError()));
+
+    // 一帧都没解过：必须是「没测到」，不能是 0。
+    QCOMPARE(worker->averageDecodeMs(), -1.0);
+
+    QSignalSpy spy(worker, &lanrdp::DecoderWorker::frameDecoded);
+    QVERIFY2(feedAll(worker, lib, spy), "no frame delivered");
+
+    const double ms = worker->averageDecodeMs();
+    QVERIFY2(ms > 0.0, qPrintable(QStringLiteral("解码耗时没量到：%1").arg(ms)));
+    // 320×240 的软解 + 色彩转换不该要上百毫秒。取到这种值说明计时起止点错了
+    //（比如把等条件变量的时间也算了进去）。
+    QVERIFY2(ms < 100.0, qPrintable(QStringLiteral("解码耗时读数不合理：%1 ms").arg(ms)));
+    qInfo("平均解码耗时 %.3f ms/帧", ms);
+
+    worker->stop();
 }
 
 QTEST_GUILESS_MAIN(TestDecoderWorker)

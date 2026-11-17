@@ -1,17 +1,25 @@
 #include <QtTest/QtTest>
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QNetworkProxy>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
+
+#include <memory>
 
 #include "net/ClientConnection.h"
+#include "net/ClipboardSync.h"
+#include "net/FileReceiver.h"
 #include "net/HostServer.h"
 #include "net/Session.h"
+#include "protocol/Clipboard.h"
 
 // ClientConnection 的**通用行为**测试。
 //
@@ -40,6 +48,12 @@ private slots:
     void errorFromRetiredSocketIsNotCurrent();
     // 连着的时候再连一次：旧 socket 的临终 disconnected 不许拆掉新连接
     void reconnectingWhileConnectedKeepsNewSession();
+    // 一批文件必须串行发（FileSender 同一时刻只能传一个，撞上去会中止前一个）
+    void sendFilesQueuesOneFileAtATime();
+    // 队列里有一份发不出去就整批放弃（对端按清单凑批，缺一个就永远等不齐）
+    void failedFileAbandonsTheRestOfTheBatch();
+    // 剪贴板里的一批文件：先清单、再文件，两者必须指向同一批
+    void sendClipboardFilesSendsManifestThenFiles();
 };
 
 // 传输 id 从随机值起步、同连接内递增。
@@ -312,6 +326,253 @@ void TestClientConnection::reconnectingWhileConnectedKeepsNewSession()
         QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
     QVERIFY2(conn.ready(), "重连之后新连接应当照常就绪");
     QCOMPARE(lostCount, 0);   // 旧实现这里为 1
+
+    conn.disconnectNow();
+}
+
+// 一次交出去三个文件，必须是「一个传完再传下一个」。
+//
+// FileSender 的 start() 在状态仍是 Sending 时会先 conclude(false) 把前一个中止掉，
+// 所以从前连着调三次 sendFile 只会送达最后一个（前两个各留一条「已中止」日志、
+// 接收侧半截文件被删）。剪贴板复制文件正好是「一次三个」，必须走队列。
+void TestClientConnection::sendFilesQueuesOneFileAtATime()
+{
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    lanrdp::AuthBackoff::Config cfg;
+    cfg.baseDelayMs = 0;
+    cfg.maxDelayMs  = 0;
+    host.setBackoffConfig(cfg);
+    QVERIFY(host.listen(0, QHostAddress::LocalHost));
+
+    QTemporaryDir recvDir;
+    QVERIFY(recvDir.isValid());
+
+    // 接收侧用真的 FileReceiver（生产拓扑：一个实例、按来源分别记账）
+    auto receiver = std::make_unique<lanrdp::FileReceiver>(recvDir.path());
+    QStringList landed;
+    QObject::connect(receiver.get(), &lanrdp::FileReceiver::finished, receiver.get(),
+                     [&landed](bool ok, const QString &path, const QString &) {
+                         if (ok)
+                             landed.append(path);
+                     });
+    QObject::connect(&host, &lanrdp::HostServer::clientAuthenticated, &host,
+                     [&receiver](lanrdp::Session *session) {
+                         QObject::connect(session, &lanrdp::Session::frameReceived,
+                                          receiver.get(),
+                                          [&receiver, session](const lanrdp::Frame &frame) {
+                                              receiver->onFrame(session, frame);
+                                          });
+                     });
+
+    lanrdp::ClientConnection conn;
+    QStringList started;
+    QObject::connect(&conn, &lanrdp::ClientConnection::fileStarted, &conn,
+                     [&started](const QString &name, quint64) { started.append(name); });
+
+    conn.connectTo(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QElapsedTimer t;
+    t.start();
+    while (!conn.ready() && t.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    QVERIFY2(conn.ready(), "应当能连上测试用被控端");
+
+    QTemporaryDir sendDir;
+    QVERIFY(sendDir.isValid());
+    QStringList paths;
+    for (const char *name : {"a.txt", "b.txt", "c.txt"}) {
+        const QString path = QDir(sendDir.path()).absoluteFilePath(QLatin1String(name));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QByteArrayLiteral("payload-") + name);
+        file.close();
+        paths.append(path);
+    }
+
+    QVERIFY(conn.sendFiles(paths));
+    QTRY_COMPARE_WITH_TIMEOUT(landed.size(), 3, 15000);
+
+    // 顺序 = 提交顺序：串行发送的唯一可观测证据
+    QStringList landedNames;
+    for (const QString &path : landed)
+        landedNames.append(QFileInfo(path).fileName());
+    QCOMPARE(landedNames,
+             (QStringList{QStringLiteral("a.txt"), QStringLiteral("b.txt"),
+                          QStringLiteral("c.txt")}));
+    QCOMPARE(started, landedNames);
+
+    conn.disconnectNow();
+}
+
+// 队列里有一份发不出去就整批放弃，不接受「能发几个发几个」。
+//
+// 剪贴板这批是对端按清单**凑齐**才写进剪贴板的：少一个就永远凑不齐，
+// 已经落盘的几个只能在超时后连同清单一起作废（对方白白多收文件）。
+// 所以 start() 一失败就清队列、别再往下发。
+void TestClientConnection::failedFileAbandonsTheRestOfTheBatch()
+{
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    lanrdp::AuthBackoff::Config cfg;
+    cfg.baseDelayMs = 0;
+    cfg.maxDelayMs  = 0;
+    host.setBackoffConfig(cfg);
+    QVERIFY(host.listen(0, QHostAddress::LocalHost));
+
+    QTemporaryDir recvDir;
+    QVERIFY(recvDir.isValid());
+
+    auto receiver = std::make_unique<lanrdp::FileReceiver>(recvDir.path());
+    QStringList landed;
+    QObject::connect(receiver.get(), &lanrdp::FileReceiver::finished, receiver.get(),
+                     [&landed](bool ok, const QString &path, const QString &) {
+                         if (ok)
+                             landed.append(QFileInfo(path).fileName());
+                     });
+    QObject::connect(&host, &lanrdp::HostServer::clientAuthenticated, &host,
+                     [&receiver](lanrdp::Session *session) {
+                         QObject::connect(session, &lanrdp::Session::frameReceived,
+                                          receiver.get(),
+                                          [&receiver, session](const lanrdp::Frame &frame) {
+                                              receiver->onFrame(session, frame);
+                                          });
+                     });
+
+    lanrdp::ClientConnection conn;
+    QStringList started;
+    QStringList logs;
+    QObject::connect(&conn, &lanrdp::ClientConnection::fileStarted, &conn,
+                     [&started](const QString &name, quint64) { started.append(name); });
+    QObject::connect(&conn, &lanrdp::ClientConnection::logMessage, &conn,
+                     [&logs](const QString &message) { logs.append(message); });
+
+    conn.connectTo(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QElapsedTimer t;
+    t.start();
+    while (!conn.ready() && t.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    QVERIFY2(conn.ready(), "应当能连上测试用被控端");
+
+    QTemporaryDir sendDir;
+    QVERIFY(sendDir.isValid());
+    auto createFile = [&sendDir](const QString &name) {
+        const QString path = QDir(sendDir.path()).absoluteFilePath(name);
+        QFile         file(path);
+        if (!file.open(QIODevice::WriteOnly))
+            return QString();
+        file.write(QByteArrayLiteral("payload-") + name.toUtf8());
+        return path;
+    };
+    const QString first = createFile(QStringLiteral("a.txt"));
+    const QString third = createFile(QStringLiteral("c.txt"));
+    QVERIFY(!first.isEmpty());
+    QVERIFY(!third.isEmpty());
+
+    // 中间那个不存在 ⇒ start() 立即失败（空文件同理）
+    const QString missing = QDir(sendDir.path()).absoluteFilePath(QStringLiteral("missing.txt"));
+    QVERIFY(!QFileInfo::exists(missing));
+
+    QVERIFY(conn.sendFiles(QStringList{first, missing, third}));
+
+    // 先等接收侧真的落了第一份 —— 发送端的 finished 早于对端写盘，
+    // 只等日志会在接收侧还没处理完时就断言（实测 landed 仍是 0）。
+    QTRY_COMPARE_WITH_TIMEOUT(landed.size(), 1, 15000);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !logs.filter(QStringLiteral("已放弃队列中剩余的")).isEmpty(), 5000);
+    QVERIFY2(logs.filter(QStringLiteral("已放弃队列中剩余的 1 个文件")).size() == 1,
+             qPrintable(logs.join(QLatin1Char('\n'))));
+
+    // 第一份照常送达；第三份一次都不该被发出（连 fileStarted 都不该有）
+    QCOMPARE(landed, QStringList{QStringLiteral("a.txt")});
+    QCOMPARE(started, QStringList{QStringLiteral("a.txt")});
+
+    // 再等一拍，确认没有「悄悄补发」
+    QTest::qWait(300);
+    QCOMPARE(landed, QStringList{QStringLiteral("a.txt")});
+
+    conn.disconnectNow();
+}
+
+// 剪贴板里的一批文件：**清单先走、文件随后**，而且清单里的名字与真正落盘的那批一致。
+// 清单早一个、晚一个，接收侧就会一直等那几个不来的文件（最后整批放弃）。
+void TestClientConnection::sendClipboardFilesSendsManifestThenFiles()
+{
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    lanrdp::AuthBackoff::Config cfg;
+    cfg.baseDelayMs = 0;
+    cfg.maxDelayMs  = 0;
+    host.setBackoffConfig(cfg);
+    QVERIFY(host.listen(0, QHostAddress::LocalHost));
+
+    QTemporaryDir recvDir;
+    QVERIFY(recvDir.isValid());
+
+    auto receiver = std::make_unique<lanrdp::FileReceiver>(recvDir.path());
+    QStringList landed;
+    QObject::connect(receiver.get(), &lanrdp::FileReceiver::finished, receiver.get(),
+                     [&landed](bool ok, const QString &path, const QString &) {
+                         if (ok)
+                             landed.append(path);
+                     });
+
+    // 接收侧的剪贴板同步器（不装端口：本用例只关心它认出清单这件事）
+    auto clipboard = std::make_unique<lanrdp::ClipboardSync>();
+    QStringList manifestNames;
+    bool        manifestCameFirst = false;
+    QObject::connect(clipboard.get(), &lanrdp::ClipboardSync::filesIncoming, clipboard.get(),
+                     [&manifestNames, &manifestCameFirst, &landed](const QStringList &names) {
+                         manifestNames    = names;
+                         manifestCameFirst = landed.isEmpty();   // 清单必须先于文件
+                     });
+
+    QObject::connect(&host, &lanrdp::HostServer::clientAuthenticated, &host,
+                     [&receiver, &clipboard](lanrdp::Session *session) {
+                         QObject::connect(session, &lanrdp::Session::frameReceived, receiver.get(),
+                                          [&receiver, session](const lanrdp::Frame &frame) {
+                                              receiver->onFrame(session, frame);
+                                          });
+                         QObject::connect(session, &lanrdp::Session::frameReceived, clipboard.get(),
+                                          [&clipboard](const lanrdp::Frame &frame) {
+                                              clipboard->handleFrame(frame);
+                                          });
+                     });
+
+    lanrdp::ClientConnection conn;
+    QStringList logs;
+    QObject::connect(&conn, &lanrdp::ClientConnection::logMessage, &conn,
+                     [&logs](const QString &line) { logs.append(line); });
+
+    conn.connectTo(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QElapsedTimer t;
+    t.start();
+    while (!conn.ready() && t.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    QVERIFY2(conn.ready(), "应当能连上测试用被控端");
+
+    QTemporaryDir sendDir;
+    QVERIFY(sendDir.isValid());
+    QStringList paths;
+    for (const char *name : {"甲.txt", "乙.txt"}) {
+        // 源码是 UTF-8，字面量按 UTF-8 还原（QLatin1String 会把字节当 Latin-1 读坏）
+        const QString path = QDir(sendDir.path()).absoluteFilePath(QString::fromUtf8(name));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QByteArrayLiteral("payload-") + name);
+        file.close();
+        paths.append(path);
+    }
+
+    QVERIFY(conn.sendClipboardFiles(paths));
+    QTRY_COMPARE_WITH_TIMEOUT(landed.size(), 2, 15000);
+
+    QCOMPARE(manifestNames, (QStringList{QStringLiteral("甲.txt"), QStringLiteral("乙.txt")}));
+    QVERIFY2(manifestCameFirst, "清单必须先到：接收侧靠它决定「凑几个才写剪贴板」");
+
+    // 超过上限：一个都不发，而且原因要落到日志里（按钮没反应总得有个说法）
+    QStringList tooMany;
+    for (int i = 0; i < lanrdp::kClipboardMaxFiles + 1; ++i)
+        tooMany.append(QDir(sendDir.path()).absoluteFilePath(QStringLiteral("x%1.txt").arg(i)));
+    QVERIFY(!conn.sendClipboardFiles(tooMany));
+    QVERIFY2(!logs.isEmpty() && logs.last().contains(QStringLiteral("64")),
+             qPrintable(logs.isEmpty() ? QStringLiteral("没有日志") : logs.last()));
 
     conn.disconnectNow();
 }

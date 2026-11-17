@@ -20,6 +20,9 @@ private slots:
     void summaryJoinsAddresses();
     void summaryExplainsWhenEmpty();
     void cardTextIsOneEndpointPerLine();
+    void inviteTextCarriesTheThreeFields();
+    void inviteTextOmitsThePasswordLineWhenEmpty();
+    void inviteTextIsEmptyWithoutAddresses();
 };
 
 void TestLanAddresses::virtualAdaptersAreRecognised()
@@ -93,6 +96,32 @@ void TestLanAddresses::cardTextIsOneEndpointPerLine()
     QCOMPARE(lanrdp::connectionCardText(addrs, 9002),
              QStringLiteral("192.168.1.104:9002\n192.168.11.3:9002"));
     QVERIFY(lanrdp::connectionCardText(QStringList(), 9002).isEmpty());
+}
+
+// 邀请串是「照抄就能连上」的文本：三行分别对应【新连接…】里的三个框。
+// 顺序固定 地址 / 端口 / 口令 —— 与对话框里从上到下的次序一致，抄的时候不会串行。
+void TestLanAddresses::inviteTextCarriesTheThreeFields()
+{
+    const QStringList addrs = {QStringLiteral("192.168.1.104"), QStringLiteral("192.168.11.3")};
+    QCOMPARE(lanrdp::inviteText(addrs, 9002, QStringLiteral("secret")),
+             QStringLiteral("地址 192.168.1.104、192.168.11.3\n"
+                            "端口 9002\n"
+                            "口令 secret"));
+}
+
+// 没填口令时不能留一行空的「口令 」——那看起来像口令是空的，
+// 而空口令在对端是**几乎必被拒**的（见 PasswordPolicy）。
+void TestLanAddresses::inviteTextOmitsThePasswordLineWhenEmpty()
+{
+    QCOMPARE(lanrdp::inviteText({QStringLiteral("10.0.0.7")}, 9000, QString()),
+             QStringLiteral("地址 10.0.0.7\n端口 9000"));
+}
+
+// 一个局域网地址都没有时（网线插着但没拿到 IP），不该产出一段「地址 」的残句：
+// 空串让调用方能把按钮直接禁掉。
+void TestLanAddresses::inviteTextIsEmptyWithoutAddresses()
+{
+    QVERIFY(lanrdp::inviteText(QStringList(), 9000, QStringLiteral("secret")).isEmpty());
 }
 
 QTEST_MAIN(TestLanAddresses)
