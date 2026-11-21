@@ -71,7 +71,7 @@ void TestCliArgs::defaultsToGuiMode()
     QCOMPARE(o.sendWaitMs, 400);
     QCOMPARE(o.holdTokenMs, 0);
     QCOMPARE(o.tokenWaitMs, 2000);
-    QCOMPARE(o.bitrateBps, 12 * 1000 * 1000);   // 默认 12 Mbps（Phase 34：20 fps 下每帧要更多字节）
+    QCOMPARE(o.bitrateBps, 12 * 1000 * 1000);   // 默认 12 Mbps（20 fps 下每帧要更多字节）
 
     QVERIFY(o.password.isEmpty());
     QVERIFY(o.peerHost.isEmpty());
