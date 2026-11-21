@@ -4,527 +4,527 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../app/MainWindow.cpp" line="282"/>
+        <location filename="../app/MainWindow.cpp" line="283"/>
         <source>本机音频输出不可用，听不到对方的声音</source>
         <translation>Audio output is unavailable on this computer.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="333"/>
+        <location filename="../app/MainWindow.cpp" line="334"/>
         <source>接收中：%1</source>
         <translation>Receiving: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="334"/>
-        <location filename="../app/MainWindow.cpp" line="1947"/>
-        <location filename="../app/MainWindow.cpp" line="3274"/>
+        <location filename="../app/MainWindow.cpp" line="335"/>
+        <location filename="../app/MainWindow.cpp" line="1948"/>
+        <location filename="../app/MainWindow.cpp" line="3288"/>
         <source>接收中</source>
         <translation>Receiving</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="346"/>
-        <location filename="../app/MainWindow.cpp" line="1960"/>
+        <location filename="../app/MainWindow.cpp" line="347"/>
+        <location filename="../app/MainWindow.cpp" line="1961"/>
         <source>接收中 %1 / %2 (%3%)</source>
         <translation>Receiving %1 / %2 (%3%)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="358"/>
+        <location filename="../app/MainWindow.cpp" line="359"/>
         <source>文件接收完成：%1</source>
         <translation>File received: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="362"/>
+        <location filename="../app/MainWindow.cpp" line="363"/>
         <source>文件接收失败</source>
         <translation>File transfer failed</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="393"/>
+        <location filename="../app/MainWindow.cpp" line="394"/>
         <source>文件已发给对方：%1</source>
         <translation>Sent to the other computer: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="400"/>
+        <location filename="../app/MainWindow.cpp" line="401"/>
         <source>发送文件失败</source>
         <translation>Could not send the file</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="450"/>
+        <location filename="../app/MainWindow.cpp" line="451"/>
         <source>日志写不进文件（不影响使用）：%1</source>
         <translation>Cannot write the log file (not fatal): %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="576"/>
-        <location filename="../app/MainWindow.cpp" line="1479"/>
+        <location filename="../app/MainWindow.cpp" line="577"/>
+        <location filename="../app/MainWindow.cpp" line="1480"/>
         <source>就绪</source>
         <translation>Ready</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="587"/>
-        <location filename="../app/MainWindow.cpp" line="1469"/>
+        <location filename="../app/MainWindow.cpp" line="588"/>
+        <location filename="../app/MainWindow.cpp" line="1470"/>
         <source>正在接收对方发送的文件。
 完成后将自动校验文件完整性。</source>
         <translation>Receiving a file from the remote computer.
 The file is verified when the transfer completes.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="596"/>
-        <location filename="../app/MainWindow.cpp" line="1473"/>
+        <location filename="../app/MainWindow.cpp" line="597"/>
+        <location filename="../app/MainWindow.cpp" line="1474"/>
         <source>正在向对方发送文件。
 也可以将文件拖入画面发送。</source>
         <translation>Sending a file to the remote computer.
 You can also drag a file onto the screen to send it.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="996"/>
-        <location filename="../app/MainWindow.cpp" line="1436"/>
+        <location filename="../app/MainWindow.cpp" line="997"/>
+        <location filename="../app/MainWindow.cpp" line="1437"/>
         <location filename="../tests/test_i18n.cpp" line="139"/>
         <location filename="../tests/test_i18n.cpp" line="151"/>
         <source>被控</source>
         <translation>Hosting</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="998"/>
-        <location filename="../app/MainWindow.cpp" line="1050"/>
+        <location filename="../app/MainWindow.cpp" line="999"/>
+        <location filename="../app/MainWindow.cpp" line="1051"/>
         <source>开始监听…</source>
         <translation>Start listening…</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1001"/>
-        <location filename="../app/MainWindow.cpp" line="1056"/>
+        <location filename="../app/MainWindow.cpp" line="1002"/>
+        <location filename="../app/MainWindow.cpp" line="1057"/>
         <source>本机开始等待连接：先确认端口和口令，再开始监听</source>
         <translation>Wait for incoming connections: confirm the port and password first</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1009"/>
-        <location filename="../app/MainWindow.cpp" line="1059"/>
-        <location filename="../app/MainWindow.cpp" line="2384"/>
+        <location filename="../app/MainWindow.cpp" line="1010"/>
+        <location filename="../app/MainWindow.cpp" line="1060"/>
+        <location filename="../app/MainWindow.cpp" line="2388"/>
         <source>收回操作权</source>
         <translation>Take back control</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1011"/>
+        <location filename="../app/MainWindow.cpp" line="1012"/>
         <source>立刻收回对方对本机的键鼠控制并保持锁定；再点一次恢复。锁定不影响文件传输</source>
         <translation>Immediately revoke remote keyboard and mouse control over this computer and keep it locked; click again to restore. Locking does not affect file transfer</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1019"/>
-        <location filename="../app/MainWindow.cpp" line="1451"/>
+        <location filename="../app/MainWindow.cpp" line="1020"/>
+        <location filename="../app/MainWindow.cpp" line="1452"/>
         <source>发送文件…</source>
         <translation>Send file…</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1021"/>
-        <location filename="../app/MainWindow.cpp" line="1452"/>
+        <location filename="../app/MainWindow.cpp" line="1022"/>
+        <location filename="../app/MainWindow.cpp" line="1453"/>
         <source>把文件发给正在操作本机的对方；文件保存到对方的接收目录，完成后自动校验完整性</source>
         <translation>Send files to the person currently controlling this computer; they are saved in their receive folder and verified when done.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1049"/>
+        <location filename="../app/MainWindow.cpp" line="1050"/>
         <source>停止监听</source>
         <translation>Stop listening</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1058"/>
-        <location filename="../app/MainWindow.cpp" line="2392"/>
+        <location filename="../app/MainWindow.cpp" line="1059"/>
+        <location filename="../app/MainWindow.cpp" line="2396"/>
         <source>恢复操作</source>
         <translation>Restore control</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1139"/>
+        <location filename="../app/MainWindow.cpp" line="1140"/>
         <source>选择要看的屏幕：共 %1 块，当前是第 %2 块</source>
         <translation>Choose the screen to view: %1 screen(s), currently screen %2</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1155"/>
+        <location filename="../app/MainWindow.cpp" line="1156"/>
         <source>第 %1 格（未连接）</source>
         <translation>Panel %1 (not connected)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1157"/>
+        <location filename="../app/MainWindow.cpp" line="1158"/>
         <source>未连接</source>
         <translation>Not connected</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1162"/>
+        <location filename="../app/MainWindow.cpp" line="1163"/>
         <source>（正在重连…）</source>
         <translation> (reconnecting…)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1163"/>
+        <location filename="../app/MainWindow.cpp" line="1164"/>
         <source>（已断开）</source>
         <translation> (disconnected)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1177"/>
+        <location filename="../app/MainWindow.cpp" line="1178"/>
         <source>等待远程画面…</source>
         <translation>Waiting for the remote screen…</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1195"/>
+        <location filename="../app/MainWindow.cpp" line="1196"/>
         <source>连接已断开，正在自动重连…
 （条上可【重连】立刻再试，或【关闭】这一格）</source>
         <translation>Connection lost, reconnecting automatically…
 (use [Reconnect] on the bar to retry now, or [Close] this panel)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1196"/>
+        <location filename="../app/MainWindow.cpp" line="1197"/>
         <source>已断开：画面停在最后一帧
 （条上可【重连】或【关闭】这一格）</source>
         <translation>Disconnected: showing the last frame
 (use [Reconnect] or [Close] on the bar)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1229"/>
-        <location filename="../app/MainWindow.cpp" line="1438"/>
+        <location filename="../app/MainWindow.cpp" line="1230"/>
+        <location filename="../app/MainWindow.cpp" line="1439"/>
         <source>视图</source>
         <translation>View</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1231"/>
-        <location filename="../app/MainWindow.cpp" line="1443"/>
+        <location filename="../app/MainWindow.cpp" line="1232"/>
+        <location filename="../app/MainWindow.cpp" line="1444"/>
         <source>悬浮操作条</source>
         <translation>Overlay bar</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1236"/>
-        <location filename="../app/MainWindow.cpp" line="1444"/>
+        <location filename="../app/MainWindow.cpp" line="1237"/>
+        <location filename="../app/MainWindow.cpp" line="1445"/>
         <source>显示 / 隐藏画面顶部的悬浮操作条（Ctrl+L）</source>
         <translation>Show or hide the overlay bar at the top of the screen (Ctrl+L)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1247"/>
-        <location filename="../app/MainWindow.cpp" line="1440"/>
+        <location filename="../app/MainWindow.cpp" line="1248"/>
+        <location filename="../app/MainWindow.cpp" line="1441"/>
         <source>设置</source>
         <translation>Settings</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1248"/>
-        <location filename="../app/MainWindow.cpp" line="1447"/>
+        <location filename="../app/MainWindow.cpp" line="1249"/>
+        <location filename="../app/MainWindow.cpp" line="1448"/>
         <source>设置…</source>
         <translation>Settings…</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1970"/>
+        <location filename="../app/MainWindow.cpp" line="1971"/>
         <source>收到对方的文件：%1</source>
         <translation>Received from the other computer: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1973"/>
+        <location filename="../app/MainWindow.cpp" line="1974"/>
         <source>接收文件失败</source>
         <translation>Could not receive the file</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2828"/>
+        <location filename="../app/MainWindow.cpp" line="2842"/>
         <source>先开始监听，再发文件</source>
         <translation>Start listening before sending files</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3085"/>
+        <location filename="../app/MainWindow.cpp" line="3099"/>
         <source>剪贴板里有 %1 个文件，可以发给对方</source>
         <translation>%1 file(s) in the clipboard — ready to send</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3101"/>
+        <location filename="../app/MainWindow.cpp" line="3115"/>
         <source>正在把 %1 个文件发给对方</source>
         <translation>Sending %1 file(s) to the other computer</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3343"/>
+        <location filename="../app/MainWindow.cpp" line="3357"/>
         <source>已开启对方的声音</source>
         <translation>Remote audio on</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3343"/>
+        <location filename="../app/MainWindow.cpp" line="3357"/>
         <source>已关闭对方的声音</source>
         <translation>Remote audio off</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1251"/>
-        <location filename="../app/MainWindow.cpp" line="1448"/>
+        <location filename="../app/MainWindow.cpp" line="1252"/>
+        <location filename="../app/MainWindow.cpp" line="1449"/>
         <source>连接、窗口与控制选项</source>
         <translation>Connection, window and control options</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="474"/>
+        <location filename="../app/MainWindow.cpp" line="475"/>
         <source>已勾选开机自动等待连接，但还没有保存口令</source>
         <translation>Auto-listen on start is enabled, but no password is saved yet</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1266"/>
-        <location filename="../app/MainWindow.cpp" line="1374"/>
+        <location filename="../app/MainWindow.cpp" line="1267"/>
+        <location filename="../app/MainWindow.cpp" line="1375"/>
         <source>外观</source>
         <translation>Appearance</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1282"/>
-        <location filename="../app/MainWindow.cpp" line="1378"/>
+        <location filename="../app/MainWindow.cpp" line="1283"/>
+        <location filename="../app/MainWindow.cpp" line="1379"/>
         <source>深色</source>
         <translation>Dark</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1284"/>
-        <location filename="../app/MainWindow.cpp" line="1383"/>
+        <location filename="../app/MainWindow.cpp" line="1285"/>
+        <location filename="../app/MainWindow.cpp" line="1384"/>
         <source>浅色</source>
         <translation>Light</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1286"/>
-        <location filename="../app/MainWindow.cpp" line="1379"/>
+        <location filename="../app/MainWindow.cpp" line="1287"/>
+        <location filename="../app/MainWindow.cpp" line="1380"/>
         <source>深色外观：暗底浅字，适合长时间盯画面</source>
         <translation>Dark appearance: light text on dark, easier on the eyes over long sessions</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1287"/>
-        <location filename="../app/MainWindow.cpp" line="1384"/>
+        <location filename="../app/MainWindow.cpp" line="1288"/>
+        <location filename="../app/MainWindow.cpp" line="1385"/>
         <source>浅色外观：亮底深字，适合白天或明亮的房间</source>
         <translation>Light appearance: dark text on light, suits daytime or bright rooms</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1299"/>
-        <location filename="../app/MainWindow.cpp" line="1336"/>
+        <location filename="../app/MainWindow.cpp" line="1300"/>
+        <location filename="../app/MainWindow.cpp" line="1337"/>
         <source>语言</source>
         <translation>Language</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1315"/>
+        <location filename="../app/MainWindow.cpp" line="1316"/>
         <source>跟随系统</source>
         <translation>Follow system</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1358"/>
+        <location filename="../app/MainWindow.cpp" line="1359"/>
         <source>界面语言未能切换：程序内没有英文翻译资源</source>
         <translation>Could not switch the interface language: this build has no English translation</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1542"/>
+        <location filename="../app/MainWindow.cpp" line="1543"/>
         <source>仍在后台运行</source>
         <translation>Still running in the background</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1543"/>
+        <location filename="../app/MainWindow.cpp" line="1544"/>
         <source>图标可能收在任务栏右下角的隐藏图标里，双击它即可恢复窗口。</source>
         <translation>The icon may be in the hidden-icons area of the taskbar; double-click it to restore the window.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1566"/>
+        <location filename="../app/MainWindow.cpp" line="1567"/>
         <source>仍在后台共享</source>
         <translation>Still sharing in the background</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1568"/>
+        <location filename="../app/MainWindow.cpp" line="1569"/>
         <source>还在等待同事连接。要彻底退出，请在托盘图标上选【退出】。</source>
         <translation>Still waiting for someone to connect. To quit completely, choose [Quit] on the tray icon.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1569"/>
+        <location filename="../app/MainWindow.cpp" line="1570"/>
         <source>同事仍能看到本机画面。要彻底停止，请在托盘图标上选【停止共享】或【退出】。</source>
         <translation>Others can still see this screen. To stop completely, choose [Stop sharing] or [Quit] on the tray icon.</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1638"/>
+        <location filename="../app/MainWindow.cpp" line="1639"/>
         <source>请先在【开始监听…】里保存口令，再开启这一项</source>
         <translation>Save a password in Start listening… first, then turn this on</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1646"/>
+        <location filename="../app/MainWindow.cpp" line="1647"/>
         <source>开机自启未能开启：%1</source>
         <translation>Could not enable auto-start: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1647"/>
+        <location filename="../app/MainWindow.cpp" line="1648"/>
         <source>开机自启未能关闭：%1</source>
         <translation>Could not disable auto-start: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1908"/>
+        <location filename="../app/MainWindow.cpp" line="1909"/>
         <source>已连接，等待画面…</source>
         <translation>Connected, waiting for the screen…</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="375"/>
-        <location filename="../app/MainWindow.cpp" line="1990"/>
+        <location filename="../app/MainWindow.cpp" line="376"/>
+        <location filename="../app/MainWindow.cpp" line="1991"/>
         <source>发送中：%1</source>
         <translation>Sending: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="376"/>
-        <location filename="../app/MainWindow.cpp" line="1991"/>
+        <location filename="../app/MainWindow.cpp" line="377"/>
+        <location filename="../app/MainWindow.cpp" line="1992"/>
         <source>发送中</source>
         <translation>Sending</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="383"/>
-        <location filename="../app/MainWindow.cpp" line="2003"/>
+        <location filename="../app/MainWindow.cpp" line="384"/>
+        <location filename="../app/MainWindow.cpp" line="2004"/>
         <source>发送中 %1 / %2 (%3%)</source>
         <translation>Sending %1 / %2 (%3%)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1029"/>
-        <location filename="../app/MainWindow.cpp" line="1063"/>
+        <location filename="../app/MainWindow.cpp" line="1030"/>
+        <location filename="../app/MainWindow.cpp" line="1064"/>
         <source>隐私遮挡</source>
         <translation>&quot;Privacy curtain&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1032"/>
-        <location filename="../app/MainWindow.cpp" line="1065"/>
+        <location filename="../app/MainWindow.cpp" line="1033"/>
+        <location filename="../app/MainWindow.cpp" line="1066"/>
         <source>立刻让本机屏幕变黑、定格对方画面并收回操作权；再点一次恢复（%1）</source>
         <translation>&quot;Black out this screen, freeze the remote view and take back input control; click again to restore (%1)&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1054"/>
+        <location filename="../app/MainWindow.cpp" line="1055"/>
         <source>停止监听：断开所有已连接的控制端，本机不再接受新连接（急停热键 %1）</source>
         <translation>&quot;Stop listening: disconnect every controller and refuse new connections (panic hotkey %1)&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1062"/>
+        <location filename="../app/MainWindow.cpp" line="1063"/>
         <source>取消遮挡</source>
         <translation>&quot;Remove curtain&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="1459"/>
+        <location filename="../app/MainWindow.cpp" line="1460"/>
         <source>已遮挡</source>
         <translation>&quot;Curtain on&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2014"/>
+        <location filename="../app/MainWindow.cpp" line="2015"/>
         <source>文件发送完成</source>
         <translation>File sent</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2017"/>
+        <location filename="../app/MainWindow.cpp" line="2018"/>
         <source>文件发送失败</source>
         <translation>File send failed</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2070"/>
+        <location filename="../app/MainWindow.cpp" line="2071"/>
         <source>本机已在监听（先停止监听才能修改参数）</source>
         <translation>Already listening (stop listening to change the settings)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2362"/>
-        <location filename="../app/MainWindow.cpp" line="2541"/>
+        <location filename="../app/MainWindow.cpp" line="2366"/>
+        <location filename="../app/MainWindow.cpp" line="2547"/>
         <source>暂无控制端连接</source>
         <translation>No viewers connected</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2367"/>
+        <location filename="../app/MainWindow.cpp" line="2371"/>
         <source>● %1（可操作本机）</source>
         <translation>● %1 (has control)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2369"/>
+        <location filename="../app/MainWindow.cpp" line="2373"/>
         <source>踢出该控制端</source>
         <translation>Disconnect this viewer</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2393"/>
+        <location filename="../app/MainWindow.cpp" line="2397"/>
         <source>收回操作权并锁定</source>
         <translation>Take back control and lock</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2419"/>
+        <location filename="../app/MainWindow.cpp" line="2423"/>
         <source>屏 %1 · %2×%3</source>
         <translation>Screen %1 · %2×%3</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2424"/>
+        <location filename="../app/MainWindow.cpp" line="2428"/>
         <source> · 主屏</source>
         <translation> · primary</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2547"/>
+        <location filename="../app/MainWindow.cpp" line="2553"/>
         <source>● %1（当前可操作本机）</source>
         <translation>● %1 (currently has control)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2551"/>
+        <location filename="../app/MainWindow.cpp" line="2557"/>
         <source>（操作权已锁定：任何控制端都操作不了本机）</source>
         <translation>(Control is locked: no viewer can operate this computer)</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2552"/>
+        <location filename="../app/MainWindow.cpp" line="2558"/>
         <source>%1
 点击查看可用操作：断开指定控制端 / 收回操作权</source>
         <translation>%1
 Click for actions: disconnect a viewer / take back control</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2564"/>
+        <location filename="../app/MainWindow.cpp" line="2570"/>
         <source>已连 %1 个控制端</source>
         <translation>%1 viewer(s) connected</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2595"/>
+        <location filename="../app/MainWindow.cpp" line="2601"/>
         <source>正在被 %1 个连接查看本机</source>
         <translation>%1 connection(s) viewing this computer</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2596"/>
+        <location filename="../app/MainWindow.cpp" line="2602"/>
         <source>没有控制端连接</source>
         <translation>No viewers connected</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2807"/>
-        <location filename="../app/MainWindow.cpp" line="2832"/>
+        <location filename="../app/MainWindow.cpp" line="2821"/>
+        <location filename="../app/MainWindow.cpp" line="2846"/>
         <source>选择要发送的文件</source>
         <translation>Choose a file to send</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2854"/>
+        <location filename="../app/MainWindow.cpp" line="2868"/>
         <source>口令不合规，未开始监听</source>
         <translation>Invalid password, listening not started</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2866"/>
+        <location filename="../app/MainWindow.cpp" line="2880"/>
         <source>监听失败</source>
         <translation>Listening failed</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2914"/>
+        <location filename="../app/MainWindow.cpp" line="2928"/>
         <source>当前没有在监听</source>
         <translation>&quot;Not listening&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2920"/>
+        <location filename="../app/MainWindow.cpp" line="2934"/>
         <source>已急停：本机不再接受连接</source>
         <translation>&quot;Panic stop: this machine refuses new connections&quot;</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3068"/>
+        <location filename="../app/MainWindow.cpp" line="3082"/>
         <source>剪贴板未同步：%1</source>
         <translation>Clipboard not synced: %1</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="2787"/>
+        <location filename="../app/MainWindow.cpp" line="2801"/>
         <source>正在传输 %1 个文件</source>
         <translation>Sending %1 files</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3110"/>
+        <location filename="../app/MainWindow.cpp" line="3124"/>
         <source>对方复制了 %1 个文件</source>
         <translation>The other side copied %1 files</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3115"/>
+        <location filename="../app/MainWindow.cpp" line="3129"/>
         <source>%1 个文件已就绪，可直接粘贴</source>
         <translation>%1 files are ready to paste</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3273"/>
+        <location filename="../app/MainWindow.cpp" line="3287"/>
         <source>%1 | %2x%3 | %4 fps | %5 Mbps | 累计 %6 帧</source>
         <translation>%1 | %2x%3 | %4 fps | %5 Mbps | %6 frames total</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3274"/>
+        <location filename="../app/MainWindow.cpp" line="3288"/>
         <source>推送中</source>
         <translation>Streaming</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3284"/>
+        <location filename="../app/MainWindow.cpp" line="3298"/>
         <source> | 注入 %1 次</source>
         <translation> | %1 injected</translation>
     </message>
     <message>
-        <location filename="../app/MainWindow.cpp" line="3286"/>
+        <location filename="../app/MainWindow.cpp" line="3300"/>
         <source>（失败 %1）</source>
         <translation> (%1 failed)</translation>
     </message>
@@ -716,57 +716,57 @@ Click for actions: disconnect a viewer / take back control</translation>
 <context>
     <name>lanrdp::ConnectDialog</name>
     <message>
-        <location filename="../app/Dialogs.cpp" line="361"/>
+        <location filename="../app/Dialogs.cpp" line="379"/>
         <source>新连接</source>
         <translation>New connection</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="370"/>
+        <location filename="../app/Dialogs.cpp" line="388"/>
         <source>远程电脑的 IP 地址或主机名。</source>
         <translation>IP address or host name of the remote computer.</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="380"/>
+        <location filename="../app/Dialogs.cpp" line="398"/>
         <source>至少 6 位</source>
         <translation>At least 6 characters</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="389"/>
+        <location filename="../app/Dialogs.cpp" line="407"/>
         <source>对方地址</source>
         <translation>Remote address</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="390"/>
+        <location filename="../app/Dialogs.cpp" line="408"/>
         <source>对方端口</source>
         <translation>Remote port</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="391"/>
+        <location filename="../app/Dialogs.cpp" line="409"/>
         <source>访问口令</source>
         <translation>Password</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="396"/>
+        <location filename="../app/Dialogs.cpp" line="414"/>
         <source>连接</source>
         <translation>Connect</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="397"/>
+        <location filename="../app/Dialogs.cpp" line="415"/>
         <source>取消</source>
         <translation>Cancel</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="412"/>
+        <location filename="../app/Dialogs.cpp" line="430"/>
         <source>局域网内正在等人的电脑</source>
         <translation>Computers on this network waiting for a connection</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="545"/>
+        <location filename="../app/Dialogs.cpp" line="563"/>
         <source>请填写对方地址。</source>
         <translation>Enter the remote address.</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="552"/>
+        <location filename="../app/Dialogs.cpp" line="570"/>
         <source>口令至少 6 位，且只能用英文字母、数字和符号。</source>
         <translation>The password must be at least 6 characters, using only ASCII letters, digits and symbols.</translation>
     </message>
@@ -822,7 +822,7 @@ You will be asked for the port and password.</translation>
     <name>lanrdp::HostConfigDialog</name>
     <message>
         <location filename="../app/Dialogs.cpp" line="95"/>
-        <location filename="../app/Dialogs.cpp" line="253"/>
+        <location filename="../app/Dialogs.cpp" line="270"/>
         <source>开始监听</source>
         <translation>Start listening</translation>
     </message>
@@ -928,38 +928,50 @@ The larger and more detailed the screen (e.g. 4K), the higher this should be.</t
         <translation>Bitrate</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="249"/>
+        <location filename="../app/Dialogs.cpp" line="230"/>
+        <source>使用显卡做色彩转换（推荐）</source>
+        <translation>Use the GPU for color conversion (recommended)</translation>
+    </message>
+    <message>
+        <location filename="../app/Dialogs.cpp" line="233"/>
+        <source>把抓到的画面交给显卡转成编码器要的格式，大画面（如 4K）下明显更快。
+关掉后改用 CPU，画面不变、只是变慢；仅在怀疑显卡路径有问题时关闭。</source>
+        <translation>Let the GPU convert captured frames into the format the encoder wants — noticeably faster on large screens such as 4K.
+When turned off the CPU does the work instead: same picture, just slower. Only turn it off if you suspect the GPU path is at fault.</translation>
+    </message>
+    <message>
+        <location filename="../app/Dialogs.cpp" line="266"/>
         <source>若连接不上，请在 Windows 防火墙中放行本程序。</source>
         <translation>If connections fail, allow this program through Windows Firewall.</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="254"/>
+        <location filename="../app/Dialogs.cpp" line="271"/>
         <source>取消</source>
         <translation>Cancel</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="261"/>
-        <location filename="../app/Dialogs.cpp" line="331"/>
+        <location filename="../app/Dialogs.cpp" line="278"/>
+        <location filename="../app/Dialogs.cpp" line="349"/>
         <source>复制邀请串</source>
         <translation>Copy invite</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="263"/>
+        <location filename="../app/Dialogs.cpp" line="280"/>
         <source>复制「地址 / 端口 / 口令」三行，直接发给对方照填。</source>
         <translation>Copies address, port and password as three lines you can send to the other side to fill in.</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="317"/>
+        <location filename="../app/Dialogs.cpp" line="335"/>
         <source>先填好口令，邀请串里要带上它。</source>
         <translation>Fill in the password first — the invite has to include it.</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="327"/>
+        <location filename="../app/Dialogs.cpp" line="345"/>
         <source>已复制</source>
         <translation>Copied</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="346"/>
+        <location filename="../app/Dialogs.cpp" line="364"/>
         <source>口令至少 6 位，且只能用英文字母、数字和符号。</source>
         <translation>The password must be at least 6 characters, using only ASCII letters, digits and symbols.</translation>
     </message>
@@ -972,78 +984,78 @@ The larger and more detailed the screen (e.g. 4K), the higher this should be.</t
         <translation>The remote side can&apos;t hear anything: audio capture is unavailable</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="167"/>
+        <location filename="../host/HostController.cpp" line="182"/>
         <source>画面采集失败</source>
         <translation>Screen capture failed</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="175"/>
+        <location filename="../host/HostController.cpp" line="190"/>
         <source>画面中断，重试中…</source>
         <translation>Screen interrupted, retrying…</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="197"/>
+        <location filename="../host/HostController.cpp" line="225"/>
         <source>已断开一个网络过慢的控制端</source>
         <translation>Disconnected a viewer with a slow network</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="254"/>
+        <location filename="../host/HostController.cpp" line="282"/>
         <source>监听中：端口 %1</source>
         <translation>Listening on port %1</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="342"/>
+        <location filename="../host/HostController.cpp" line="370"/>
         <source>已停止监听</source>
         <translation>Stopped listening</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="421"/>
+        <location filename="../host/HostController.cpp" line="449"/>
         <source>控制端已连接，正在推送画面</source>
         <translation>Viewer connected, streaming the screen</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="435"/>
+        <location filename="../host/HostController.cpp" line="463"/>
         <source>已拒绝：控制端已满</source>
         <translation>Rejected: viewer limit reached</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="438"/>
+        <location filename="../host/HostController.cpp" line="466"/>
         <source>已拒绝：口令错误</source>
         <translation>Rejected: wrong password</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="478"/>
+        <location filename="../host/HostController.cpp" line="506"/>
         <source>控制端已断开，暂停推送</source>
         <translation>Viewer disconnected, streaming paused</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="482"/>
+        <location filename="../host/HostController.cpp" line="510"/>
         <source>控制端已断开</source>
         <translation>Viewer disconnected</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="642"/>
+        <location filename="../host/HostController.cpp" line="670"/>
         <source>没有控制端在操作本机，文件没有发出去</source>
         <translation>Nobody is controlling this computer right now, so nothing was sent</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="749"/>
+        <location filename="../host/HostController.cpp" line="777"/>
         <source>已锁定：控制端暂时无法操作本机</source>
         <translation>Locked: viewers cannot operate this computer</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="758"/>
-        <location filename="../host/HostController.cpp" line="808"/>
+        <location filename="../host/HostController.cpp" line="786"/>
+        <location filename="../host/HostController.cpp" line="836"/>
         <source>已恢复：控制端可以重新申请操作</source>
         <translation>Unlocked: viewers can request control again</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="788"/>
+        <location filename="../host/HostController.cpp" line="816"/>
         <source>已遮挡：对方看不到画面、听不到声音，也无法操作本机</source>
         <translation>Curtained: no picture, no sound, and no remote control</translation>
     </message>
     <message>
-        <location filename="../host/HostController.cpp" line="1081"/>
+        <location filename="../host/HostController.cpp" line="1132"/>
         <source>已切换画面来源：第 %1 块屏</source>
         <translation>Screen changed: now showing screen %1</translation>
     </message>
@@ -1276,52 +1288,52 @@ they may also have locked keyboard and mouse input.</translation>
 <context>
     <name>lanrdp::SettingsDialog</name>
     <message>
-        <location filename="../app/Dialogs.cpp" line="567"/>
+        <location filename="../app/Dialogs.cpp" line="585"/>
         <source>设置</source>
         <translation>Settings</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="571"/>
+        <location filename="../app/Dialogs.cpp" line="589"/>
         <source>断线自动重连</source>
         <translation>Reconnect automatically</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="575"/>
+        <location filename="../app/Dialogs.cpp" line="593"/>
         <source>接收对方声音</source>
         <translation>Receive remote audio</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="579"/>
+        <location filename="../app/Dialogs.cpp" line="597"/>
         <source>最小化到托盘</source>
         <translation>Minimize to tray</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="583"/>
+        <location filename="../app/Dialogs.cpp" line="601"/>
         <source>同时只开一个窗口</source>
         <translation>One window at a time</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="587"/>
+        <location filename="../app/Dialogs.cpp" line="605"/>
         <source>开机后自动开始等待连接</source>
         <translation>Start listening when Windows starts</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="591"/>
+        <location filename="../app/Dialogs.cpp" line="609"/>
         <source>键鼠控制</source>
         <translation>Mouse and keyboard</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="596"/>
+        <location filename="../app/Dialogs.cpp" line="614"/>
         <source>确定</source>
         <translation>OK</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="597"/>
+        <location filename="../app/Dialogs.cpp" line="615"/>
         <source>取消</source>
         <translation>Cancel</translation>
     </message>
     <message>
-        <location filename="../app/Dialogs.cpp" line="604"/>
+        <location filename="../app/Dialogs.cpp" line="622"/>
         <source>以上设置会自动保存，键鼠控制除外。</source>
         <translation>All settings above are saved, except mouse and keyboard control.</translation>
     </message>

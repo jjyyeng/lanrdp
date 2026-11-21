@@ -148,6 +148,7 @@ HostSession SessionStore::loadHost() const
     session.receiveDir = readTrimmed(ini, QStringLiteral("host/receiveDir"), session.receiveDir);
     session.useH264    = ini.value(QStringLiteral("host/useH264"), session.useH264).toBool();
     session.bitrateBps = readBitrate(ini, QStringLiteral("host/bitrateBps"), session.bitrateBps);
+    session.gpuConvert = ini.value(QStringLiteral("host/gpuConvert"), session.gpuConvert).toBool();
     return session;
 }
 
@@ -320,6 +321,7 @@ bool SessionStore::saveHost(const HostSession &session, QString *error)
     ini.setValue(QStringLiteral("host/receiveDir"), session.receiveDir);
     ini.setValue(QStringLiteral("host/useH264"), session.useH264);
     ini.setValue(QStringLiteral("host/bitrateBps"), session.bitrateBps);
+    ini.setValue(QStringLiteral("host/gpuConvert"), session.gpuConvert);
     ini.sync();
     if (ini.status() != QSettings::NoError)
     {

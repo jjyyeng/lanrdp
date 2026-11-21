@@ -24,7 +24,7 @@ struct CliOptions
     bool sendInput     = false;
     bool useRawFrames  = false;
 
-    int     bitrateBps     = 8 * 1000 * 1000;
+    int     bitrateBps     = 12 * 1000 * 1000;
     quint16 hostPort       = 9000;
     quint16 peerPort       = 9000;
     int     expectFrameMs  = 0;

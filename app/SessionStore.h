@@ -26,8 +26,12 @@ struct HostSession {
     QString password;
     QString receiveDir;
     bool    useH264 = true;
+    // 用显卡做 BGRA -> NV12 的色彩转换。默认开：关掉之后 4K 每帧多花约 10 ms，
+    // 只该在「怀疑显卡路径有问题、需要现场把它排除掉」时手动关。
+    // 缺键回落成 true —— 读成 false 等于升级后所有人静默退回 CPU 直读。
+    bool    gpuConvert = true;
     // 压缩码率上限（bps）。老版本 ini 里没有这个键，读到默认值即可。
-    int     bitrateBps = 8 * 1000 * 1000;
+    int     bitrateBps = 12 * 1000 * 1000;
 };
 
 struct PeerSession {

@@ -1,5 +1,7 @@
 #include "host/ScreenCapturer.h"
 
+#include "host/Nv12Converter.h"
+
 #include <d3d11.h>
 #include <dxgi1_2.h>
 
@@ -355,6 +357,10 @@ bool ScreenCapturer::init(QString *error, bool *recoverable, int preferredOutput
 
 void ScreenCapturer::shutdown()
 {
+    // 显卡转换器持有这个设备的纹理与视图，设备一放它们全失效 ⇒ 必须先清。
+    if (nv12_)
+        nv12_->reset();
+
     if (staging_) {
         staging_->Release();
         staging_ = nullptr;
@@ -380,15 +386,16 @@ void ScreenCapturer::shutdown()
     monitorRect_ = QRect();
 }
 
-CaptureStatus ScreenCapturer::capture(QImage *out, int timeoutMs, QString *error)
+// 拿到一帧的 BGRA 纹理（已通过格式校验）。成功时调用方必须：
+//   texture->Release(); duplication_->ReleaseFrame();
+// 这两步**由调用方**做，是因为不同下游（QImage / NV12）要在不同时机放帧。
+CaptureStatus ScreenCapturer::acquireTexture(int timeoutMs, QString *error,
+                                            ID3D11Texture2D **outTexture, int *outWidth,
+                                            int *outHeight)
 {
-    if (!out)
+    if (!outTexture)
         return CaptureStatus::Failed;
-
-    if (!ready_ || !duplication_) {
-        setError(error, QStringLiteral("抓屏器未初始化"));
-        return CaptureStatus::Failed;
-    }
+    *outTexture = nullptr;
 
     DXGI_OUTDUPL_FRAME_INFO info{};
     IDXGIResource         *resource = nullptr;
@@ -438,29 +445,68 @@ CaptureStatus ScreenCapturer::capture(QImage *out, int timeoutMs, QString *error
         return CaptureStatus::Failed;
     }
 
-    // 暂存纹理（CPU 可读），尺寸变化时重建
-    if (!staging_ || stagingW_ != static_cast<int>(desc.Width)
-        || stagingH_ != static_cast<int>(desc.Height)) {
-        if (staging_) {
-            staging_->Release();
-            staging_ = nullptr;
-        }
-        D3D11_TEXTURE2D_DESC sd = desc;
-        sd.Usage          = D3D11_USAGE_STAGING;
-        sd.BindFlags      = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.MiscFlags      = 0;
-        sd.MipLevels      = 1;
-        sd.ArraySize      = 1;
-        hr = device_->CreateTexture2D(&sd, nullptr, &staging_);
-        if (FAILED(hr)) {
-            texture->Release();
-            duplication_->ReleaseFrame();
-            setError(error, QStringLiteral("创建暂存纹理失败"), hr);
-            return CaptureStatus::Failed;
-        }
-        stagingW_ = static_cast<int>(desc.Width);
-        stagingH_ = static_cast<int>(desc.Height);
+    *outTexture = texture;
+    if (outWidth)
+        *outWidth = static_cast<int>(desc.Width);
+    if (outHeight)
+        *outHeight = static_cast<int>(desc.Height);
+    return CaptureStatus::Ok;
+}
+
+// 暂存纹理（CPU 可读），尺寸变化时重建。CPU 路径与「NV12 自检的参考帧」共用这一张。
+bool ScreenCapturer::ensureStaging(int width, int height, QString *error)
+{
+    if (staging_ && stagingW_ == width && stagingH_ == height)
+        return true;
+
+    if (staging_) {
+        staging_->Release();
+        staging_ = nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width            = static_cast<UINT>(width);
+    sd.Height           = static_cast<UINT>(height);
+    sd.MipLevels        = 1;
+    sd.ArraySize        = 1;
+    sd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.SampleDesc.Count = 1;
+    sd.Usage            = D3D11_USAGE_STAGING;
+    sd.BindFlags        = 0;
+    sd.CPUAccessFlags   = D3D11_CPU_ACCESS_READ;
+
+    const HRESULT hr = device_->CreateTexture2D(&sd, nullptr, &staging_);
+    if (FAILED(hr)) {
+        staging_ = nullptr;
+        setError(error, QStringLiteral("创建暂存纹理失败"), hr);
+        return false;
+    }
+    stagingW_ = width;
+    stagingH_ = height;
+    return true;
+}
+
+CaptureStatus ScreenCapturer::capture(QImage *out, int timeoutMs, QString *error)
+{
+    if (!out)
+        return CaptureStatus::Failed;
+
+    if (!ready_ || !duplication_) {
+        setError(error, QStringLiteral("抓屏器未初始化"));
+        return CaptureStatus::Failed;
+    }
+
+    ID3D11Texture2D *texture = nullptr;
+    int              w       = 0;
+    int              h       = 0;
+    const CaptureStatus status = acquireTexture(timeoutMs, error, &texture, &w, &h);
+    if (status != CaptureStatus::Ok)
+        return status;
+
+    if (!ensureStaging(w, h, error)) {
+        texture->Release();
+        duplication_->ReleaseFrame();
+        return CaptureStatus::Failed;
     }
 
     // GPU 拷贝到暂存纹理，随后立即释放帧
@@ -469,14 +515,12 @@ CaptureStatus ScreenCapturer::capture(QImage *out, int timeoutMs, QString *error
     duplication_->ReleaseFrame();
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped);
+    HRESULT                  hr = context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) {
         setError(error, QStringLiteral("映射暂存纹理失败"), hr);
         return CaptureStatus::Failed;
     }
 
-    const int w        = static_cast<int>(desc.Width);
-    const int h        = static_cast<int>(desc.Height);
     const int rowBytes = w * 4;
 
     QImage image(w, h, QImage::Format_ARGB32);
@@ -497,6 +541,101 @@ CaptureStatus ScreenCapturer::capture(QImage *out, int timeoutMs, QString *error
 
     *out = image;
     return CaptureStatus::Ok;
+}
+
+// 抓一帧并直接产出**紧凑 NV12**，跳过 QImage 这个中间形态。
+//
+// 旧路径在 4K 下的实测分解（打点数据，2026-11-21）：capture 12~14 ms
+// （其中 33 MB 的 CopyResource + Map + 逐行 memcpy 全是为了填一张 QImage）
+// + convert 12.4 ms（标量 BGRA→NV12，又要读 33 MB、写 12 MB）。
+// 这里两条路都省掉那 33 MB 的 CPU 往返：
+//   · 显卡可用：VideoProcessorBlt 直接出 NV12 纹理，只回读 12 MB（实测 10.7 ms）
+//   · 显卡不可用：还是 BGRA 暂存，但**直接对着 mapped 内存转换**，不建 QImage（20.4 ms）
+//
+// ⚠️ 两条路的输出必须都是 BT.601 有限范围 —— 解码端就是按它反变换的。
+CaptureStatus ScreenCapturer::captureNv12(QByteArray *out, int timeoutMs, QString *error)
+{
+    if (!out)
+        return CaptureStatus::Failed;
+
+    if (!ready_ || !duplication_) {
+        setError(error, QStringLiteral("抓屏器未初始化"));
+        return CaptureStatus::Failed;
+    }
+
+    ID3D11Texture2D *texture = nullptr;
+    int              w       = 0;
+    int              h       = 0;
+    const CaptureStatus status = acquireTexture(timeoutMs, error, &texture, &w, &h);
+    if (status != CaptureStatus::Ok)
+        return status;
+
+    // ---- 1) 显卡路径（自检不过 / 驱动不支持时会自己降级，本帧改走 CPU）----
+    if (!nv12_)
+        nv12_ = std::make_unique<Nv12Converter>();
+    nv12_->bind(device_, context_);
+
+    if (nv12_->mode() == Nv12Converter::Mode::Gpu) {
+        QByteArray converted;
+        QString    convertError;
+        if (nv12_->convertTexture(texture, w, h, &converted, &convertError)) {
+            texture->Release();
+            duplication_->ReleaseFrame();
+            *out = std::move(converted);
+            return CaptureStatus::Ok;
+        }
+        // 不丢帧：这一帧照样走下面的 CPU 路径，只是慢一次。
+        pathNote_ = convertError;
+    } else if (pathNote_.isEmpty()) {
+        pathNote_ = nv12_->statusText();
+    }
+
+    // ---- 2) CPU 直读（不建 QImage，减少一次 33 MB 拷贝）----
+    if (!ensureStaging(w, h, error)) {
+        texture->Release();
+        duplication_->ReleaseFrame();
+        return CaptureStatus::Failed;
+    }
+
+    context_->CopyResource(staging_, texture);
+    texture->Release();
+    duplication_->ReleaseFrame();
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    HRESULT                  hr = context_->Map(staging_, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        setError(error, QStringLiteral("映射暂存纹理失败"), hr);
+        return CaptureStatus::Failed;
+    }
+
+    QByteArray nv12;
+    const bool ok = Nv12Converter::convertCpu(static_cast<const uchar *>(mapped.pData),
+                                              static_cast<int>(mapped.RowPitch), w, h, &nv12);
+    context_->Unmap(staging_, 0);
+
+    if (!ok) {
+        setError(error, QStringLiteral("BGRA -> NV12 转换失败"));
+        return CaptureStatus::Failed;
+    }
+
+    *out = std::move(nv12);
+    return CaptureStatus::Ok;
+}
+
+void ScreenCapturer::setGpuConversionEnabled(bool on)
+{
+    // 提前把转换器建出来：用户可能在抓到第一帧之前就把它关掉，
+    // 那时也得有个地方记住这个决定（converter 自己保存 gpuAllowed_）。
+    if (!nv12_)
+        nv12_ = std::make_unique<Nv12Converter>();
+    nv12_->setGpuAllowed(on);
+}
+
+QString ScreenCapturer::nv12PathInfo() const
+{
+    if (nv12_)
+        return nv12_->statusText();
+    return pathNote_;
 }
 
 } // namespace lanrdp

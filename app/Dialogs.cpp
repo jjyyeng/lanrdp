@@ -222,6 +222,23 @@ HostConfigDialog::HostConfigDialog(const Config &initial, QWidget *parent)
     form->addRow(h264_);   // 横跨两列
     form->addRow(tr("画面码率"), bitrate_);
 
+    // 显卡色彩转换：默认开，与码率同属「画面」这一组。
+    //
+    // 为什么要让用户能关：显卡路径的失败**全是静默的**（驱动不给 VideoProcessor、
+    // 输出色彩空间被忽略、Blt 返回失败），出问题时用户手里得有一个「立刻把它排除掉」
+    // 的开关，而不是等改代码重打包。关掉只是慢（4K 每帧多约 10 ms），画面完全一样。
+    gpuConvert_ = new QCheckBox(tr("使用显卡做色彩转换（推荐）"), this);
+    gpuConvert_->setObjectName(QStringLiteral("gpuConvertCheck"));
+    gpuConvert_->setChecked(initial.gpuConvert);
+    gpuConvert_->setToolTip(tr(
+        "把抓到的画面交给显卡转成编码器要的格式，大画面（如 4K）下明显更快。\n"
+        "关掉后改用 CPU，画面不变、只是变慢；仅在怀疑显卡路径有问题时关闭。"));
+    // 裸帧路径不经过编码器，压根不需要转格式 —— 这一项对它没有意义，与码率同口径。
+    gpuConvert_->setEnabled(initial.useH264);
+    connect(h264_, &QCheckBox::toggled, gpuConvert_, &QWidget::setEnabled);
+
+    form->addRow(gpuConvert_);   // 横跨两列
+
     // 未加密提示放在防火墙提示之前：它比「连不上」更要紧。
     form->addRow(makeInsecureHint(this));
 
@@ -297,6 +314,7 @@ HostConfigDialog::Config HostConfigDialog::config() const
     c.password   = password_->text();
     c.receiveDir = recvDir_->text().trimmed();
     c.useH264    = h264_->isChecked();
+    c.gpuConvert = gpuConvert_->isChecked();
     // currentData() 只有在条目被外部清空时才会拿到无效值，兜底回默认档。
     const int bps = bitrate_->currentData().toInt();
     c.bitrateBps  = bps > 0 ? bps : Config{}.bitrateBps;

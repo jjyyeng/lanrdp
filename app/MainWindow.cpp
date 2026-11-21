@@ -181,6 +181,7 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
         hostRecvDir_  = host.receiveDir;
         hostUseH264_  = host.useH264;
         hostBitrate_  = host.bitrateBps;
+        hostGpuConvert_ = host.gpuConvert;
 
         const lanrdp::PeerSession peer = sessionStore_.loadPeer();
         peerHost_     = peer.host;
@@ -2077,6 +2078,7 @@ void MainWindow::openHostConfigDialog()
     cfg.receiveDir = hostRecvDir_;
     cfg.useH264    = hostUseH264_;
     cfg.bitrateBps = hostBitrate_;
+    cfg.gpuConvert  = hostGpuConvert_;
 
     lanrdp::HostConfigDialog dlg(cfg, this);
     if (dlg.exec() != QDialog::Accepted)
@@ -2090,6 +2092,7 @@ void MainWindow::openHostConfigDialog()
                         : picked.receiveDir.trimmed();
     hostBitrate_  = picked.bitrateBps;
     setHostCodec(picked.useH264, picked.bitrateBps);
+    setHostGpuConvert(picked.gpuConvert);
 
     // 记住这套参数，下次打开对话框直接预填（口令在其中，ini 里是 DPAPI 密文）。
     // 写不进去要**说出来**：静默失败会让用户以为"记住了"，下次开程序发现又空了却
@@ -2101,6 +2104,7 @@ void MainWindow::openHostConfigDialog()
         saved.receiveDir = hostRecvDir_;
         saved.useH264    = hostUseH264_;
         saved.bitrateBps = hostBitrate_;
+        saved.gpuConvert = hostGpuConvert_;
         QString saveError;
         if (!sessionStore_.saveHost(saved, &saveError)) {
             log(QStringLiteral("⚠ 会话参数未能完整保存（%1）：%2。下次启动可能需要重新填写。")
@@ -2491,9 +2495,10 @@ bool MainWindow::hostStartSync(quint16 port, const QString &password)
 
     // 启动参数与 start() 一起在工作线程里落定 —— 分两次投递会让「参数生效」与
     // 「开始监听」之间出现一个可被观察到的中间态。
-    const QString recvDir = receiveDir();
-    const bool    useH264 = hostUseH264_;
-    const int     bitrate = hostBitrate_;
+    const QString recvDir   = receiveDir();
+    const bool    useH264   = hostUseH264_;
+    const int     bitrate   = hostBitrate_;
+    const bool    gpuConvert = hostGpuConvert_;
 
     bool                    ok = false;
     lanrdp::HostController *h  = host_;
@@ -2501,9 +2506,10 @@ bool MainWindow::hostStartSync(quint16 port, const QString &password)
     // 保证 invokeMethod 返回时那段 lambda 已经执行完毕。
     QMetaObject::invokeMethod(
         h,
-        [h, port, password, recvDir, useH264, bitrate, &ok] {
+        [h, port, password, recvDir, useH264, bitrate, gpuConvert, &ok] {
             h->setReceiveDir(recvDir);
             h->setCodec(useH264, bitrate);
+            h->setGpuConversionEnabled(gpuConvert);
             ok = h->start(port, password);
         },
         Qt::BlockingQueuedConnection);
@@ -2691,6 +2697,14 @@ void MainWindow::setHostCodec(bool useH264, int bitrateBps)
     hostBitrate_ = bitrateBps;
     postToHost(
         [useH264, bitrateBps](lanrdp::HostController *h) { h->setCodec(useH264, bitrateBps); });
+}
+
+void MainWindow::setHostGpuConvert(bool on)
+{
+    // 与 setHostCodec 同规矩：留一份做对话框回填，生效的那份在宿主里。
+    hostGpuConvert_ = on;
+    // 只在监听中才有实际效果（抓屏器还没建时，宿主会记住这个值，建的时候应用）。
+    postToHost([on](lanrdp::HostController *h) { h->setGpuConversionEnabled(on); });
 }
 
 // ---------------------------------------------------------------------------

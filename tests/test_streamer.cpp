@@ -35,6 +35,10 @@ private slots:
     void congestionDetectedWithoutNewFrames();
     void rawPathAlsoThrottlesFps();
 
+    // NV12 快速路径：不产出 QImage（省掉一次 33 MB 往返），但尺寸与帧照旧
+    void h264FastPathSkipsImageButReportsSize();
+    void previewRequestBringsBackImagePath();
+
     // H.264 编码失败后必须显式降级并停止重试（帧类型不得逐帧抖动）
     void h264FailureSwitchesToRawAndStopsRetrying();
     void codecFallbackIsEmittedExactlyOnce();
@@ -129,6 +133,92 @@ void TestStreamer::dispatchesEncodedFramesToTargets()
 
     QVERIFY(streamer.framesSent() >= 1);
     QVERIFY(streamer.bytesSent() >= static_cast<quint64>(frame.payload.size()));
+}
+
+// 快速路径（H.264 + 不要 QImage）必须：
+// ① 不再 emit frameCaptured —— 那正是被省掉的那张 33 MB 图；
+// ② 仍然报帧尺寸 —— 状态栏的分辨率读数全靠它，缺了就是「连上了但分辨率空白」；
+// ③ 帧照常发出去 —— 省成本不能省功能。
+void TestStreamer::h264FastPathSkipsImageButReportsSize()
+{
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+
+    QTcpSocket client;
+    client.connectToHost(QHostAddress::LocalHost, server.serverPort());
+    QVERIFY(client.waitForConnected(3000));
+    QVERIFY(server.waitForNewConnection(3000));
+
+    QTcpSocket *serverSide = server.nextPendingConnection();
+    QVERIFY(serverSide != nullptr);
+
+    lanrdp::Session session(serverSide);
+
+    QByteArray received;
+    QObject::connect(&client, &QTcpSocket::readyRead,
+                     [&received, &client]() { received.append(client.readAll()); });
+
+    const QImage expected = makeImage(64, 48);
+
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([&expected](QImage *out) {
+        *out = expected;
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::H264);
+    streamer.addTarget(&session);
+
+    QSignalSpy imageSpy(&streamer, &lanrdp::ScreenStreamer::frameCaptured);
+    QSignalSpy sizeSpy(&streamer, &lanrdp::ScreenStreamer::frameSizeChanged);
+    QVERIFY(imageSpy.isValid());
+    QVERIFY(sizeSpy.isValid());
+
+    streamer.start();
+    QTRY_VERIFY_WITH_TIMEOUT(sizeSpy.count() >= 1, 5000);
+
+    // 第一拍：尺寸到了，图没到 —— 这就是快速路径的定义
+    QCOMPARE(sizeSpy.at(0).at(0).toSize(), QSize(64, 48));
+    QCOMPARE(imageSpy.count(), 0);
+
+    streamer.stop();
+}
+
+// 预览要 QImage 时必须老老实实回到老路 —— 否则预览窗口永远收不到帧，
+// 而那种「开关点了没反应」的失效最难解释。
+void TestStreamer::previewRequestBringsBackImagePath()
+{
+    const QImage expected = makeImage(32, 32);
+
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([&expected](QImage *out) {
+        *out = expected;
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::H264);
+    streamer.setPreviewImageRequired(true);
+
+    QSignalSpy imageSpy(&streamer, &lanrdp::ScreenStreamer::frameCaptured);
+    QVERIFY(imageSpy.isValid());
+
+    // 没有目标就不抓帧，所以得挂一个（内容不重要，只要 tick 会跑）
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    QTcpSocket client;
+    client.connectToHost(QHostAddress::LocalHost, server.serverPort());
+    QVERIFY(client.waitForConnected(3000));
+    QVERIFY(server.waitForNewConnection(3000));
+    QTcpSocket *serverSide = server.nextPendingConnection();
+    QVERIFY(serverSide != nullptr);
+    lanrdp::Session session(serverSide);
+    streamer.addTarget(&session);
+
+    streamer.start();
+    QTRY_VERIFY_WITH_TIMEOUT(imageSpy.count() >= 1, 5000);
+    QCOMPARE(imageSpy.at(0).at(0).value<QImage>().size(), expected.size());
+
+    streamer.stop();
 }
 
 void TestStreamer::doesNotCaptureWithoutTargets()

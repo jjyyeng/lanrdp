@@ -1,5 +1,7 @@
 #include "host/ScreenStreamer.h"
 
+#include "host/Nv12Converter.h"
+
 #include "host/AdaptiveBitrate.h"
 #include "common/ColorConvert.h"
 #include "host/ScreenCapturer.h"
@@ -10,6 +12,7 @@
 
 #include <QTimer>
 
+#include <algorithm>
 #include <utility>
 
 namespace lanrdp {
@@ -33,6 +36,10 @@ ScreenStreamer::ScreenStreamer(QObject *parent)
     timer_ = new QTimer(this);
     timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &ScreenStreamer::onTick);
+
+    // 性能打点：环境变量开关，默认关。放在构造里而不是 start() 里，
+    // 是为了让它与「谁创建了这个对象」无关（测试注入的帧源同样能打点）。
+    profiling_ = qEnvironmentVariableIntValue("LANRDP_PERF") > 0;
 }
 
 ScreenStreamer::~ScreenStreamer()
@@ -245,6 +252,28 @@ bool ScreenStreamer::isRunning() const
     return timer_->isActive();
 }
 
+void ScreenStreamer::setPreviewImageRequired(bool on)
+{
+    if (previewImageRequired_ == on)
+        return;
+    previewImageRequired_ = on;
+    // 切回 QImage 路径时，编码器不必重建（尺寸没变）；但打点里的 path 标记
+    // 会在下一拍自动更新（见 onTick）。
+}
+
+void ScreenStreamer::setGpuConversionEnabled(bool on)
+{
+    if (gpuConversionEnabled_ == on)
+        return;
+    gpuConversionEnabled_ = on;
+    if (capturer_)
+        capturer_->setGpuConversionEnabled(on);
+    // 换了路径，「上次的结论」就过期了，让下一拍重新报一次 —— 否则日志会一直停在
+    // 上一句「显卡色彩转换已启用」上，而实际上早就换成 CPU 了。
+    capturePathNoted_ = false;
+}
+
+
 void ScreenStreamer::setPaused(bool paused)
 {
     if (paused_ == paused)
@@ -265,6 +294,96 @@ void ScreenStreamer::resetStats()
     bytesSent_  = 0;
 }
 
+void ScreenStreamer::setProfilingEnabled(bool on)
+{
+    if (profiling_ == on)
+        return;
+    profiling_ = on;
+    // 关掉时清干净：计时器留着（isValid 决定首拍 period 报不报），样本必须清，
+    // 否则「关一阵再开」会把两段不同工况的样本混在同一行里。
+    profileSamples_.clear();
+    tickProfile_        = TickProfile{};
+    lastInjectedRef_    = injectedCounter_ ? injectedCounter_() : 0;
+    if (on)
+        tickClock_.invalidate();   // 首拍没有「上一拍」，period 报 0
+}
+
+void ScreenStreamer::setInjectedCounter(std::function<quint64()> counter)
+{
+    injectedCounter_ = std::move(counter);
+    lastInjectedRef_ = injectedCounter_ ? injectedCounter_() : 0;
+}
+
+// 一拍收尾：攒够 kProfileSamples 后汇总一行（p50 / p95），然后清空样本重新攒。
+//
+// 为什么必须给 p95：卡顿感来自尖峰而不是中位数。4K 软编实测方差很大，
+// 出现「中位 22 ms、p95 38 ms」时，20 fps（50 ms 预算）看起来够用，
+// 实际上每四五个拍就有一次踩线 —— 那才是「偶尔一顿」的来源。
+void ScreenStreamer::profileTickSnapshot()
+{
+    if (!profiling_)
+        return;
+
+    // 注入事件增量：两次采样之间的到达数，摊到每拍。
+    if (injectedCounter_) {
+        const quint64 now = injectedCounter_();
+        tickProfile_.injected = static_cast<qint64>(now - lastInjectedRef_);
+        lastInjectedRef_      = now;
+    }
+
+    profileSamples_.append(tickProfile_);
+    tickProfile_ = TickProfile{};
+    if (profileSamples_.size() < kProfileSamples)
+        return;
+
+    // 分位数取「最近秩」：idx = round(q * (n-1))。n=25 时 p50 取第 12 个、p95 取第 23 个。
+    // 用取值函数而不是成员指针：totalUs() 是成员**函数**，取不到成员指针。
+    using FieldGetter = std::function<qint64(const TickProfile &)>;
+    const auto percentile = [this](const FieldGetter &getter, double q) -> qint64 {
+        QVector<qint64> values;
+        values.reserve(profileSamples_.size());
+        for (const TickProfile &sample : std::as_const(profileSamples_))
+            values.append(getter(sample));
+        std::sort(values.begin(), values.end());
+        const int last = values.size() - 1;
+        const int idx  = qBound(0, static_cast<int>(q * last + 0.5), last);
+        return values.at(idx);
+    };
+
+    qint64 periodSum = 0;
+    qint64 injectSum = 0;
+    for (const TickProfile &sample : std::as_const(profileSamples_)) {
+        periodSum += sample.periodUs;
+        injectSum += sample.injected;
+    }
+    const double n = static_cast<double>(profileSamples_.size());
+
+    const auto toMs = [](qint64 us) { return QString::number(us / 1000.0, 'f', 1); };
+
+    QString line = QStringLiteral("perf n=%1 period=%2ms inject=%3/tick path=%4 | ")
+                       .arg(profileSamples_.size())
+                       .arg(toMs(periodSum / static_cast<qint64>(n)))
+                       .arg(QString::number(injectSum / n, 'f', 1))
+                       .arg(perfPath_.isEmpty() ? QStringLiteral("?") : perfPath_);
+
+    // capture / convert / encode / send 分开报 —— 「谁最贵」正是这次打点唯一要回答的问题。
+    line += QStringLiteral("p50 capture=%1 convert=%2 encode=%3 send=%4 total=%5")
+                .arg(toMs(percentile([](const TickProfile &s) { return s.captureUs; }, 0.5)),
+                     toMs(percentile([](const TickProfile &s) { return s.convertUs; }, 0.5)),
+                     toMs(percentile([](const TickProfile &s) { return s.encodeUs; }, 0.5)),
+                     toMs(percentile([](const TickProfile &s) { return s.sendUs; }, 0.5)),
+                     toMs(percentile([](const TickProfile &s) { return s.totalUs(); }, 0.5)));
+    line += QStringLiteral(" | p95 capture=%1 convert=%2 encode=%3 send=%4 total=%5")
+                .arg(toMs(percentile([](const TickProfile &s) { return s.captureUs; }, 0.95)),
+                     toMs(percentile([](const TickProfile &s) { return s.convertUs; }, 0.95)),
+                     toMs(percentile([](const TickProfile &s) { return s.encodeUs; }, 0.95)),
+                     toMs(percentile([](const TickProfile &s) { return s.sendUs; }, 0.95)),
+                     toMs(percentile([](const TickProfile &s) { return s.totalUs(); }, 0.95)));
+
+    profileSamples_.clear();
+    emit perfSample(line);
+}
+
 QString ScreenStreamer::sourceInfo() const
 {
     return capturer_ ? capturer_->deviceInfo() : QString();
@@ -277,6 +396,82 @@ QRect ScreenStreamer::capturedRect() const
     return QRect();
 }
 
+namespace {
+// 等新帧的上限。`AcquireNextFrame` 在桌面静止时会**等满**它，而这段等待发生在
+// 与 socket 读 / 输入注入**同一条线程**上 —— 所以它直接计入最坏响应延迟。
+// 原先写死 100 ms（那是「抓屏 / 编码 / socket / 注入全挤在 GUI 线程」年代为
+// 「别把界面冻太久」留的折中）。
+//
+// 改到 15 ms 的依据 —— 实测（tests/test_hostcontroller.cpp::
+// hostStaysResponsiveWhileStreaming 量的就是推流期间 `TokenReq -> TokenGrant`
+// 往返，每轮 25 个样本，本机 loopback）：
+//
+//   本轮等待上限     中位              最大
+//   100 ms          61 ms            201 ms
+//    15 ms          46–62 ms        171–266 ms
+//     1 ms          46–47 ms        139–153 ms   ← 再压已无收益
+//
+// 即：**100 → 15 有收益（中位约 −14 ms），15 → 1 没有**。所以 15 ms 是拐点，
+// 也避免了每拍空转轮询。
+//
+// ⚠️ **别指望它把延迟压到 15 ms 量级**：往返的大头**不是**这里的等待，而是同一拍里的
+// 「抓屏拷贝 + 色彩转换 + H.264 编码 + 扇出」。要再往下压只有两条路：把每帧成本降下来
+// （已做：NV12 由显卡直出，4K 单拍 40 ms → 约 25 ms），或者把采集/编码与
+// socket/注入拆成两条线程（尚未做）。
+//
+// 代价为零：tick 频率由定时器决定、不因超时变短而变密；等待本身几乎不吃 CPU。
+constexpr int kMaxAcquireWaitMs = 15;
+} // namespace
+
+bool ScreenStreamer::ensureCapturer(CaptureStatus *status, QString *error)
+{
+    if (capturer_)
+        return true;
+
+    capturer_ = new ScreenCapturer();
+    QString initError;
+    bool    recoverable = false;
+    if (!capturer_->init(&initError, &recoverable, outputIndex_)) {
+        delete capturer_;
+        capturer_ = nullptr;
+        if (error)
+            *error = initError;
+        // 「创建即失败」也分两档：例如被控端**启动时**正锁屏 / 显示输出被
+        // ToDesk 独占（DuplicateOutput 返 E_ACCESSDENIED）属于可恢复 —— 此时
+        // 必须回 RecoverableLost 才会走「永不放弃、限频重试」那条路；若一律
+        // 回 Failed，连续几次后就停流了，用户得手动重新【开始监听】。
+        if (status)
+            *status = captureStatusForInitFailure(recoverable);
+        return false;
+    }
+
+    // 请求的那块屏不在了 ⇒ ScreenCapturer 已回落主屏。把**真实** index 记下来，
+    // 这样上层广播出去的 SCREEN_LIST 与实际在抓的那块永远一致
+    //（否则控制端菜单会一直勾在一块不存在的屏上）。
+    outputIndex_      = capturer_->outputIndex();
+    capturer_->setGpuConversionEnabled(gpuConversionEnabled_);
+    capturePathNoted_ = false;
+    return true;
+}
+
+CaptureStatus ScreenStreamer::dropCapturerAndReport(CaptureStatus status,
+                                                    const QString &captureError, QString *error)
+{
+    // 失败的抓屏器**一律作废**，下个 tick 走上面的惰性初始化重建。
+    // · 旧实现只在 `capturer_ == nullptr` 时初始化 —— 一旦初始化过，死掉的 duplication_
+    //   就再也没有重建的机会，这正是「一次 ACCESS_LOST 之后画面永久冻结」的根因。
+    // · ScreenCapturer::init 内部第一步就是 shutdown()，所以反复重建是安全的。
+    // · RecoverableLost 时 ScreenCapturer 已经自我作废（ready_=false、monitorRect_ 清空），
+    //   因此这里不需要额外处理「过期的注入几何」。
+    delete capturer_;
+    capturer_         = nullptr;
+    capturePathNoted_ = false;
+
+    if (error)
+        *error = captureError;
+    return status;
+}
+
 CaptureStatus ScreenStreamer::captureFrame(QImage *out, QString *error)
 {
     if (error)
@@ -287,84 +482,81 @@ CaptureStatus ScreenStreamer::captureFrame(QImage *out, QString *error)
         return source_(out);
 
     // 2) 内置 DXGI 抓屏，惰性初始化
-    if (!capturer_) {
-        capturer_ = new ScreenCapturer();
-        QString initError;
-        bool    recoverable = false;
-        if (!capturer_->init(&initError, &recoverable, outputIndex_)) {
-            delete capturer_;
-            capturer_ = nullptr;
-            if (error)
-                *error = initError;
-            // 「创建即失败」也分两档：例如被控端**启动时**正锁屏 / 显示输出被
-            // ToDesk 独占（DuplicateOutput 返 E_ACCESSDENIED）属于可恢复 —— 此时
-            // 必须回 RecoverableLost 才会走「永不放弃、限频重试」那条路；若一律
-            // 回 Failed，连续几次后就停流了，用户得手动重新【开始监听】。
-            return captureStatusForInitFailure(recoverable);
-        }
-
-        // 请求的那块屏不在了 ⇒ ScreenCapturer 已回落主屏。把**真实** index 记下来，
-        // 这样上层广播出去的 SCREEN_LIST 与实际在抓的那块永远一致
-        //（否则控制端菜单会一直勾在一块不存在的屏上）。
-        outputIndex_ = capturer_->outputIndex();
-    }
+    CaptureStatus initStatus = CaptureStatus::Failed;
+    if (!ensureCapturer(&initStatus, error))
+        return initStatus;
 
     QString captureError;
-    // 等新帧的上限。`AcquireNextFrame` 在桌面静止时会**等满**它，而这段等待发生在
-    // 与 socket 读 / 输入注入**同一条线程**上 —— 所以它直接计入最坏响应延迟。
-    // 原先写死 100 ms（那是「抓屏 / 编码 / socket / 注入全挤在 GUI 线程」年代为
-    // 「别把界面冻太久」留的折中）。
-    //
-    // 改到 15 ms 的依据 —— 实测（tests/test_hostcontroller.cpp::
-    // hostStaysResponsiveWhileStreaming 量的就是推流期间 `TokenReq -> TokenGrant`
-    // 往返，每轮 25 个样本，本机 loopback）：
-    //
-    //   本轮等待上限     中位              最大
-    //   100 ms          61 ms            201 ms
-    //    15 ms          46–62 ms        171–266 ms
-    //     1 ms          46–47 ms        139–153 ms   ← 再压已无收益
-    //
-    // 即：**100 → 15 有收益（中位约 −14 ms），15 → 1 没有**。所以 15 ms 是拐点，
-    // 也避免了每拍空转轮询。
-    //
-    // ⚠️ **别指望它把延迟压到 15 ms 量级**：往返的大头**不是**这里的等待，而是同一拍里的
-    // 「抓屏拷贝 + 色彩转换 + H.264 编码 + 扇出」（1 ms 那轮的中位仍是 46 ms 即可反证）。
-    // 要再往下压只有一条路：把采集/编码与 socket/注入**拆成两条线程**。
-    //
-    // 代价为零：tick 频率由定时器决定、不因超时变短而变密；等待本身几乎不吃 CPU。
-    constexpr int kMaxAcquireWaitMs = 15;
     const CaptureStatus status =
         capturer_->capture(out, qMin(intervalMs_, kMaxAcquireWaitMs), &captureError);
 
-    if (status == CaptureStatus::Ok)
-        return status;
-    if (status == CaptureStatus::NoNewFrame)
-        return status;  // 桌面无变化，不是错误，跳过本次发送
+    if (status == CaptureStatus::Ok || status == CaptureStatus::NoNewFrame)
+        return status;   // 桌面无变化不是错误，跳过本次发送
 
-    // 失败的抓屏器**一律作废**，下个 tick 走上面的惰性初始化重建。
-    // · 旧实现只在 `capturer_ == nullptr` 时初始化 —— 一旦初始化过，死掉的 duplication_
-    // 就再也没有重建的机会，这正是「一次 ACCESS_LOST 之后画面永久冻结」的根因。
-    // · ScreenCapturer::init 内部第一步就是 shutdown()，所以反复重建是安全的。
-    // · RecoverableLost 时 ScreenCapturer 已经自我作废（ready_=false、monitorRect_ 清空），
-    // 因此这里不需要额外处理「过期的注入几何」。
-    delete capturer_;
-    capturer_ = nullptr;
-
-    if (error)
-        *error = captureError;
-    return status;
+    return dropCapturerAndReport(status, captureError, error);
 }
 
-bool ScreenStreamer::encodeH264(const QImage &frame, QVector<H264EncodedFrame> *out, QString *error)
+CaptureStatus ScreenStreamer::captureFrameNv12(QByteArray *out, int *width, int *height,
+                                               QString *error)
 {
     if (error)
         error->clear();
-    if (frame.isNull())
-        return false;
+    if (!out || !width || !height)
+        return CaptureStatus::Failed;
 
-    const int width  = frame.width();
-    const int height = frame.height();
-    if (width <= 0 || height <= 0)
+    // 1) 注入的帧源（测试 / 自定义源）：它只能给出 QImage，按老路转一次。
+    //    这条路径**不碰显卡**，所以测试不需要真实桌面也不需要显卡也能跑。
+    if (source_) {
+        QImage frame;
+        const CaptureStatus status = source_(&frame);
+        if (status != CaptureStatus::Ok)
+            return status;
+        if (frame.isNull())
+            return CaptureStatus::Failed;
+
+        const QImage source = (frame.format() == QImage::Format_ARGB32)
+                                  ? frame
+                                  : frame.convertToFormat(QImage::Format_ARGB32);
+        QByteArray nv12;
+        if (source.isNull()
+            || !Nv12Converter::convertCpu(source.constBits(), static_cast<int>(source.bytesPerLine()),
+                                          source.width(), source.height(), &nv12)) {
+            if (error)
+                *error = QStringLiteral("BGRA -> NV12 转换失败");
+            return CaptureStatus::Failed;
+        }
+        *width  = source.width();
+        *height = source.height();
+        *out    = std::move(nv12);
+        return CaptureStatus::Ok;
+    }
+
+    // 2) 内置 DXGI 抓屏
+    CaptureStatus initStatus = CaptureStatus::Failed;
+    if (!ensureCapturer(&initStatus, error))
+        return initStatus;
+
+    QString captureError;
+    const CaptureStatus status =
+        capturer_->captureNv12(out, qMin(intervalMs_, kMaxAcquireWaitMs), &captureError);
+
+    if (status == CaptureStatus::Ok) {
+        *width  = capturer_->width();
+        *height = capturer_->height();
+        return status;
+    }
+    if (status == CaptureStatus::NoNewFrame)
+        return status;
+
+    return dropCapturerAndReport(status, captureError, error);
+}
+
+bool ScreenStreamer::encodeH264Nv12(const QByteArray &nv12, int width, int height,
+                                    QVector<H264EncodedFrame> *out, QString *error)
+{
+    if (error)
+        error->clear();
+    if (nv12.isEmpty() || width <= 0 || height <= 0)
         return false;
     if ((width % 2) != 0 || (height % 2) != 0) {
         if (error) {
@@ -389,20 +581,14 @@ bool ScreenStreamer::encodeH264(const QImage &frame, QVector<H264EncodedFrame> *
         forceKeyframe_ = true;   // 新编码器必须先出一个关键帧，解码端才能起步
     }
 
-    const QImage source = (frame.format() == QImage::Format_ARGB32)
-                              ? frame
-                              : frame.convertToFormat(QImage::Format_ARGB32);
-    const QByteArray nv12 = bgraToNv12(source.constBits(),
-                                       static_cast<int>(source.bytesPerLine()), width, height);
-    if (nv12.isEmpty()) {
-        if (error)
-            *error = QStringLiteral("BGRA -> NV12 转换失败");
-        return false;
-    }
-
     QVector<H264EncodedFrame> encoded;
-    if (!encoder_->encodeFrame(reinterpret_cast<const uchar *>(nv12.constData()), nv12.size(),
-                               forceKeyframe_, encoded)) {
+    if (profiling_)
+        codecClock_.restart();
+    const bool encodedOk = encoder_->encodeFrame(reinterpret_cast<const uchar *>(nv12.constData()),
+                                                 nv12.size(), forceKeyframe_, encoded);
+    if (profiling_)
+        tickProfile_.encodeUs = codecClock_.nsecsElapsed() / 1000;
+    if (!encodedOk) {
         if (error)
             *error = encoder_->lastError();
         return false;
@@ -430,8 +616,88 @@ bool ScreenStreamer::encodeH264(const QImage &frame, QVector<H264EncodedFrame> *
     return true;
 }
 
+bool ScreenStreamer::encodeH264(const QImage &frame, QVector<H264EncodedFrame> *out,
+                                QString *error)
+{
+    if (error)
+        error->clear();
+    if (frame.isNull())
+        return false;
+
+    const int width  = frame.width();
+    const int height = frame.height();
+    if (width <= 0 || height <= 0)
+        return false;
+    if ((width % 2) != 0 || (height % 2) != 0) {
+        if (error) {
+            *error = QStringLiteral("画面尺寸 %1x%2 为奇数，NV12 不支持").arg(width).arg(height);
+        }
+        return false;
+    }
+
+    const QImage source = (frame.format() == QImage::Format_ARGB32)
+                              ? frame
+                              : frame.convertToFormat(QImage::Format_ARGB32);
+    // 打点：转换段与编码段必须**分开**量。合成一个数就只能得到「31 ms」，
+    // 而「31 ms 里转换 10、编码 21」和「转换 25、编码 6」推导出的是完全不同的两个方案
+    //（前者值得上硬编，后者值得做 GPU NV12）。
+    //
+    // ⚠️ 这条路径现在只在**预览开着**或**自定义帧源**（测试）时才会走到；
+    // 真实推流走 captureFrameNv12 + encodeH264Nv12，转换成本记在 capture 段里。
+    if (profiling_)
+        codecClock_.restart();
+    const QByteArray nv12 = bgraToNv12(source.constBits(),
+                                       static_cast<int>(source.bytesPerLine()), width, height);
+    if (profiling_)
+        tickProfile_.convertUs = codecClock_.nsecsElapsed() / 1000;
+    if (nv12.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("BGRA -> NV12 转换失败");
+        return false;
+    }
+
+    return encodeH264Nv12(nv12, width, height, out, error);
+}
+
+void ScreenStreamer::sendH264Units(const QVector<H264EncodedFrame> &units, int width, int height)
+{
+    for (const H264EncodedFrame &unit : std::as_const(units)) {
+        H264Frame h264;
+        h264.width     = static_cast<quint32>(width);
+        h264.height    = static_cast<quint32>(height);
+        h264.keyframe  = unit.keyframe;
+        h264.bitstream = unit.bitstream;
+
+        const QByteArray payload = encodeH264Frame(h264);
+        if (payload.isEmpty())
+            continue;
+
+        int pushed = 0;
+        for (Session *target : std::as_const(targets_)) {
+            if (targetAcceptsFrame(target)) {
+                target->sendFrame(static_cast<std::uint8_t>(FrameType::ScreenFrameH264), payload);
+                ++pushed;
+                bytesSent_ += static_cast<quint64>(payload.size());
+            }
+        }
+        dropCongestedTargets();
+        if (pushed > 0)
+            ++framesSent_;
+    }
+}
+
 void ScreenStreamer::onTick()
 {
+    // 性能打点：拍间隔在**所有早退路径之前**量 —— 「tick 有没有被别的活拖后」
+    // 本身就是判据之一（文件传输 / 音频 / 大量注入都挤在同一线程）。
+    // 只有真正抓到帧的拍才计入样本（见 profileTickSnapshot），否则静止桌面的
+    // 15 ms 抓帧等待会把统计稀释得看不出问题。
+    if (profiling_) {
+        tickProfile_          = TickProfile{};
+        tickProfile_.periodUs = tickClock_.isValid() ? tickClock_.nsecsElapsed() / 1000 : 0;
+        tickClock_.restart();
+    }
+
     if (targets_.isEmpty())
         return;  // 没有观看者就不抓屏，省 CPU
 
@@ -452,10 +718,29 @@ void ScreenStreamer::onTick()
 
     applyAdaptiveStep();
 
-    QImage  frame;
-    QString error;
+    // ---- 走哪条抓屏路 ----
+    // H.264 且没人要 QImage ⇒ **NV12 直出**：显卡把 BGRA 直接转成 NV12，
+    // 省掉「填一张 4K QImage（33 MB 拷贝）+ 再读一遍做色彩转换」这整段。
+    // 4K 实测：25 ms → 10.7 ms。
+    // 需要 QImage 的两种情况仍走老路：本机预览（frameCaptured 就是它）、裸帧路径。
+    const bool h264Path  = (codec_ == StreamCodec::H264);
+    const bool needImage = previewImageRequired_ || !h264Path;
 
-    const CaptureStatus status = captureFrame(&frame, &error);
+    QImage     frame;
+    QByteArray nv12;
+    int        nv12Width  = 0;
+    int        nv12Height = 0;
+    QString    error;
+
+    if (profiling_)
+        stageClock_.restart();
+    const CaptureStatus status =
+        needImage ? captureFrame(&frame, &error)
+                  : captureFrameNv12(&nv12, &nv12Width, &nv12Height, &error);
+    if (profiling_) {
+        tickProfile_.captureUs = stageClock_.nsecsElapsed() / 1000;
+        perfPath_ = needImage ? QStringLiteral("QImage") : QStringLiteral("NV12");
+    }
 
     if (status == CaptureStatus::NoNewFrame)
         return;
@@ -474,38 +759,40 @@ void ScreenStreamer::onTick()
         emit captureResumed();
     }
 
-    emit frameCaptured(frame);
+    if (needImage) {
+        emit frameCaptured(frame);
+    } else {
+        // 快速路径没有 QImage：尺寸得单独报，否则状态栏的分辨率读数会一直是空的。
+        emit frameSizeChanged(QSize(nv12Width, nv12Height));
+        // 「用上显卡没有 / 为什么没用」只报一次。显卡路径可能因驱动静默降级，
+        // 而用户唯一的疑问正是「为什么没变快」。
+        if (!capturePathNoted_) {
+            capturePathNoted_ = true;
+            const QString note = capturer_ ? capturer_->nv12PathInfo() : QString();
+            if (!note.isEmpty())
+                emit captureNote(note);
+        }
+    }
 
     // ---- H.264 路径 ----
-    if (codec_ == StreamCodec::H264) {
+    if (h264Path) {
         QVector<H264EncodedFrame> encoded;
         QString                   encodeError;
 
-        if (encodeH264(frame, &encoded, &encodeError)) {
-            for (const H264EncodedFrame &unit : std::as_const(encoded)) {
-                H264Frame h264;
-                h264.width     = static_cast<quint32>(frame.width());
-                h264.height    = static_cast<quint32>(frame.height());
-                h264.keyframe  = unit.keyframe;
-                h264.bitstream = unit.bitstream;
+        const int frameWidth  = needImage ? frame.width() : nv12Width;
+        const int frameHeight = needImage ? frame.height() : nv12Height;
 
-                const QByteArray payload = encodeH264Frame(h264);
-                if (payload.isEmpty())
-                    continue;
+        const bool encodedOk =
+            needImage ? encodeH264(frame, &encoded, &encodeError)
+                      : encodeH264Nv12(nv12, nv12Width, nv12Height, &encoded, &encodeError);
 
-                int pushed = 0;
-                for (Session *target : std::as_const(targets_)) {
-                    if (targetAcceptsFrame(target)) {
-                        target->sendFrame(static_cast<std::uint8_t>(FrameType::ScreenFrameH264),
-                                          payload);
-                        ++pushed;
-                        bytesSent_ += static_cast<quint64>(payload.size());
-                    }
-                }
-                dropCongestedTargets();
-                if (pushed > 0)
-                    ++framesSent_;
-            }
+        if (encodedOk) {
+            if (profiling_)
+                stageClock_.restart();
+            sendH264Units(encoded, frameWidth, frameHeight);
+            if (profiling_)
+                tickProfile_.sendUs = stageClock_.nsecsElapsed() / 1000;
+            profileTickSnapshot();
             // 编码器有流水线延迟，本次没产出属正常，不能因此退回裸帧
             return;
         }
@@ -515,6 +802,9 @@ void ScreenStreamer::onTick()
         // 直接把 codec_ 打成裸帧：下一帧起走下方的裸帧路径，彻底不再重试。
         // 注意 codec_ 只记实际在用，「用户意图」由 setCodec 保留 —— 用户
         // 重新选 H.264 时 setCodec 会复位 h264Warned_ 并重建编码器。
+        //
+        // ⚠️ 快速路径手上只有 NV12，补不出裸帧载荷（裸帧是 BGRA）⇒ 这一帧丢掉。
+        //    下一帧 needImage 就变 true，自然回到 QImage + 裸帧路径。
         codec_ = StreamCodec::RawFrames;
         dropEncoder();
 
@@ -522,9 +812,15 @@ void ScreenStreamer::onTick()
             h264Warned_ = true;
             emit codecFallback(encodeError);
         }
+        if (!needImage) {
+            profileTickSnapshot();
+            return;
+        }
     }
 
     // ---- 裸帧路径 ----
+    if (profiling_)
+        stageClock_.restart();
     const QByteArray payload = encodeRawFrame(frame);
     if (payload.isEmpty())
         return;
@@ -538,9 +834,13 @@ void ScreenStreamer::onTick()
         }
     }
     dropCongestedTargets();
+    if (profiling_)
+        tickProfile_.sendUs = stageClock_.nsecsElapsed() / 1000;
 
     if (pushed > 0)
         ++framesSent_;
+
+    profileTickSnapshot();
 }
 
 void ScreenStreamer::applyAdaptiveStep()

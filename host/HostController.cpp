@@ -162,6 +162,21 @@ bool HostController::start(quint16 port, const QString &password)
             emit frameSizeChanged(frame.size());
         });
 
+        // NV12 快速路径不产出 QImage，尺寸只能单独报（同样是状态栏的分辨率口径）。
+        connect(streamer_, &ScreenStreamer::frameSizeChanged, this,
+                &HostController::frameSizeChanged);
+
+        // 「抓屏走的是显卡还是 CPU」——只报一次，进日志。
+        connect(streamer_, &ScreenStreamer::captureNote, this, [this](const QString &note) {
+            emit logLine(note);
+        });
+
+        // 预览要一张 QImage ⇒ 抓屏必须先出 QImage（放弃 NV12 快速路径）。
+        streamer_->setPreviewImageRequired(previewEnabled_);
+        // 这里的默认值也是「开」；显式下发是为了让「配置在 start() 之前就被改过」
+        // 这种顺序无关紧要 —— 谁先谁后都以 HostController 里的这份为准。
+        streamer_->setGpuConversionEnabled(gpuConversionEnabled_);
+
         connect(streamer_, &ScreenStreamer::failed, this, [this](const QString &error) {
             emit logLine(QStringLiteral("抓屏失败，已停止推送：%1").arg(error));
             emit statusText(tr("画面采集失败"));
@@ -188,6 +203,19 @@ bool HostController::start(quint16 port, const QString &password)
         connect(streamer_, &ScreenStreamer::encoderNote, this, [this](const QString &note) {
             emit logLine(QStringLiteral("编码器说明：%1").arg(note));
         });
+
+        // 性能打点（`LANRDP_PERF=1` 才生效；开关本身在 ScreenStreamer 构造里读）。
+        // 只写日志、不参与任何控制流，关掉时零开销。
+        // · 注入计数走 lambda 取本对象的累计值：它只在 hostThread_ 上被读写，
+        //   与 onTick 同线程，不需要原子。
+        // · 日志走 emit logLine 而不是 qWarning —— 全仓没有 qInstallMessageHandler，
+        //   qWarning 只到 stderr，进不了 lanrdp.log，而那是唯一能看到它的地方。
+        if (streamer_->profilingEnabled()) {
+            streamer_->setInjectedCounter([this]() { return injectedCount_; });
+            connect(streamer_, &ScreenStreamer::perfSample, this,
+                    [this](const QString &line) { emit logLine(line); });
+            emit logLine(QStringLiteral("性能打点已开启（LANRDP_PERF=1）：每 25 帧汇总一行 perf"));
+        }
 
         // 某个控制端接收太慢、积压持续超上限 ⇒ 已被停止推帧。这里把连接断开，
         // 既释放名额，也让对端明确知道「被踢了」而不是「画面卡住」。
@@ -893,6 +921,29 @@ void HostController::setCodec(bool useH264, int bitrateBps)
     useH264_ = useH264;
     bitrate_ = bitrateBps;
     applyCodec();
+}
+
+void HostController::setPreviewEnabled(bool on)
+{
+    Q_ASSERT_X(thread() == QThread::currentThread(), "HostController::setPreviewEnabled",
+               "must run on the controller's own thread (GUI must go through postToHost)");
+
+    previewEnabled_ = on;
+    // 抓屏路径要跟着切：预览画的就是 frameCaptured 那张 QImage，
+    // 而快速路径（NV12 直出）根本不建 QImage。
+    if (streamer_)
+        streamer_->setPreviewImageRequired(on);
+}
+
+void HostController::setGpuConversionEnabled(bool on)
+{
+    Q_ASSERT_X(thread() == QThread::currentThread(), "HostController::setGpuConversionEnabled",
+               "must run on the controller's own thread (GUI must go through postToHost)");
+
+    gpuConversionEnabled_ = on;
+    // 只影响抓屏那一段：编码器、socket、令牌都不受影响，所以随时可切、不必重连。
+    if (streamer_)
+        streamer_->setGpuConversionEnabled(on);
 }
 
 void HostController::applyCodec()

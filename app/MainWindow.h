@@ -108,8 +108,13 @@ public:
     void sendMouseButton(int button, bool pressed);
 
     // 被控端画面编码方式（命令行自测用；UI 上在【开始监听…】对话框里）。
-    void setHostCodec(bool useH264, int bitrateBps = 8 * 1000 * 1000);
+    void setHostCodec(bool useH264, int bitrateBps = 12 * 1000 * 1000);
     bool hostUsesH264() const { return hostUseH264_; }
+
+    // 被控端是否用显卡做色彩转换（命令行自测用；UI 上在【开始监听…】对话框里）。
+    // 关掉只是慢，画面不变 —— 它有且只有一个用途：现场排除显卡路径。
+    void setHostGpuConvert(bool on);
+    bool hostUsesGpuConvert() const { return hostGpuConvert_; }
 
     // 被控端接收文件的落盘目录（不带则用 defaultReceiveDir()：系统「下载」目录）。
     void setReceiveDir(const QString &dir);
@@ -543,7 +548,8 @@ private:
 
     bool inputEnabled_  = false;
     bool hostUseH264_   = true;
-    int  hostBitrate_   = 8 * 1000 * 1000;
+    int  hostBitrate_   = 12 * 1000 * 1000;
+    bool hostGpuConvert_ = true;
 
     // 原存在面板控件里的「启动参数」，面板删掉后改存成员 ——
     // 对话框每次开关都是新对象，参数得有地方活下来（下次打开还是上次填的值）。

@@ -1,9 +1,12 @@
 #pragma once
 
+#include <QByteArray>
 #include <QImage>
 #include <QRect>
 #include <QString>
 #include <QVector>
+
+#include <memory>
 
 // 前置声明，避免把 d3d11/dxgi 头文件泄漏到调用方
 struct ID3D11Device;
@@ -12,6 +15,8 @@ struct ID3D11Texture2D;
 struct IDXGIOutputDuplication;
 
 namespace lanrdp {
+
+class Nv12Converter;
 
 // 抓屏状态
 enum class CaptureStatus
@@ -108,7 +113,30 @@ public:
     // 而不是照着错色画下去。
     CaptureStatus capture(QImage *out, int timeoutMs = 100, QString *error = nullptr);
 
+    // 抓一帧并**直接产出紧凑 NV12**（跳过 QImage 中间形态）。这是 H.264 路径的正路：
+    // 4K 下比「先出 QImage 再转」少一次 33 MB 的全量往返（实测 25 ms -> 10.7 ms）。
+    // 显卡不可用（或色彩自检没过）时自动退化到 CPU 直读，仍是 20 ms 量级，输出格式不变。
+    // 输出布局 = Y 平面 width*height + 交织 UV，BT.601 有限范围（与 capture() 的像素同源）。
+    CaptureStatus captureNv12(QByteArray *out, int timeoutMs = 100, QString *error = nullptr);
+
+    // 设置里的「使用显卡做色彩转换」。关掉后 captureNv12 一律走 CPU 直读，
+    // 并且 nv12PathInfo() 会说清是**手动关的**（与「自检没过」区分开）。
+    // 与预览开关不同，这一项随时可切，不需要重建抓屏器。
+    void setGpuConversionEnabled(bool on);
+
+    // NV12 走的是显卡还是 CPU、为什么（诊断用，空串 = 还没抓过帧）。
+    // 这条必须能报出来：用户只会在意「为什么没变快」，而显卡路径可能因驱动静默降级。
+    QString nv12PathInfo() const;
+
 private:
+    // 拿到一帧的 BGRA 纹理（已过格式校验）。成功时**调用方**负责
+    // `texture->Release()` 与 `duplication_->ReleaseFrame()` —— 下游放帧时机不同。
+    CaptureStatus acquireTexture(int timeoutMs, QString *error, ID3D11Texture2D **outTexture,
+                                 int *outWidth, int *outHeight);
+
+    // CPU 可读的 BGRA 暂存纹理，尺寸变化时重建
+    bool ensureStaging(int width, int height, QString *error);
+
     bool                    ready_     = false;
     int                     width_     = 0;
     int                     height_    = 0;
@@ -121,6 +149,10 @@ private:
     ID3D11Texture2D        *staging_   = nullptr;
     int                     stagingW_  = 0;
     int                     stagingH_  = 0;
+    // BGRA -> NV12（显卡 VideoProcessor，自检不过则自己降级）。惰性创建：
+    // 只有真正走 captureNv12() 的机型才付这份显存（4K 约 25 MB）。
+    std::unique_ptr<Nv12Converter> nv12_;
+    QString                        pathNote_;   // 降级原因（见 nv12PathInfo()）
 };
 
 } // namespace lanrdp

@@ -90,7 +90,7 @@ public:
 
     // 编码方式（用户**意图**；H.264 打不开时 ScreenStreamer 会自行降级为裸帧）。
     // 写访问器 —— 与 setPreviewEnabled 同规矩：Debug 下断言在本线程（见 .cpp）。
-    void setCodec(bool useH264, int bitrateBps = 8 * 1000 * 1000);
+    void setCodec(bool useH264, int bitrateBps = 12 * 1000 * 1000);
     bool usesH264() const { return useH264_; }
     int  bitrate() const { return bitrate_; }
 
@@ -106,13 +106,16 @@ public:
     //
     // ⚠️ 这是**写**访问器：必须在本对象所属线程调用（GUI 侧走 `MainWindow::postToHost`）。
     // 把这条纪律从注释变成 Debug 下当场可见的失败 —— 否则漏一个调用点就是无痕数据竞争。
-    void setPreviewEnabled(bool on)
-    {
-        Q_ASSERT_X(thread() == QThread::currentThread(), "HostController::setPreviewEnabled",
-                   "must run on the controller's own thread (GUI must go through postToHost)");
-        previewEnabled_ = on;
-    }
+    // 实现放在 .cpp：要联动 ScreenStreamer::setPreviewImageRequired（这里是前置声明，
+    // 头文件里调不了它的成员）。
+    void setPreviewEnabled(bool on);
     bool previewEnabled() const { return previewEnabled_; }
+
+    // 是否允许用显卡做 BGRA -> NV12 的色彩转换（设置里的那个开关，默认开）。
+    // 关掉只是慢（4K 每帧多约 10 ms），画面不变；唯一的用途是现场排除显卡路径。
+    // ⚠️ 与 setPreviewEnabled 同规矩：写访问器，必须在本对象所属线程调用。
+    void setGpuConversionEnabled(bool on);
+    bool gpuConversionEnabled() const { return gpuConversionEnabled_; }
 
     // 剪贴板（UI 侧调，投递到本线程执行）：把已编码好的帧发给当前持令牌的控制端。
     // UI 不能自己做这件事 —— 它手里既没有可靠的持有者指针，也不能碰工作线程的 socket。
@@ -183,6 +186,7 @@ signals:
     // 日志 / 状态栏文案由 UI 决定怎么呈现（落盘、状态栏、stderr…）。
     // 本类自己只往 logPort 写文件，不碰任何界面。
     void logLine(const QString &line);
+
     void statusText(const QString &text);
 
     // UI 快照：状态 / 列表 / 统计任何一处变化时推给 GUI（跨线程自动排队）。
@@ -288,10 +292,11 @@ private:
     QTimer *statsTimer_   = nullptr;  // 1 s：把统计推给 UI（跨线程不能按需读取）
 
     bool previewEnabled_ = false;     // 见 setPreviewEnabled()
+    bool gpuConversionEnabled_ = true;   // 见 setGpuConversionEnabled()
 
     QString receiveDir_;
     bool    useH264_ = true;
-    int     bitrate_ = 8 * 1000 * 1000;
+    int     bitrate_ = 12 * 1000 * 1000;
 
     // 逻辑按下的鼠标键掩码（位 0 左 / 位 1 右 / 位 2 中）。
     // 「逻辑」= 我们**注入过按下、还没注入过抬起**，与物理键无关。

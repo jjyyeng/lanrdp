@@ -76,7 +76,10 @@ void TestSessionStore::roundTripsHostSession()
     QVERIFY(dir.isValid());
     lanrdp::SessionStore store(iniPath(dir));
 
-    const lanrdp::HostSession in = sampleHost();
+    // ⚠️ 这一项要**显式设成与默认相反**再往返：两者都是 true 的话，
+    // 就算根本没写进 ini，这条用例也一样绿 —— 那就白测了。
+    lanrdp::HostSession in = sampleHost();
+    in.gpuConvert          = false;
     QVERIFY2(store.saveHost(in), "保存应当成功");
 
     const lanrdp::HostSession out = store.loadHost();
@@ -85,6 +88,7 @@ void TestSessionStore::roundTripsHostSession()
     QCOMPARE(out.receiveDir, in.receiveDir);
     QCOMPARE(out.useH264, in.useH264);
     QCOMPARE(out.bitrateBps, in.bitrateBps);
+    QCOMPARE(out.gpuConvert, in.gpuConvert);
 }
 
 void TestSessionStore::roundTripsPeerSession()
@@ -247,14 +251,17 @@ void TestSessionStore::fallsBackOnInsaneValues()
     QCOMPARE(store.loadHost().port, quint16(9000));   // qint16 的下界以下
     QCOMPARE(store.loadPeer().port, quint16(9000));   // 越界
     QCOMPARE(store.loadPeer().host, QStringLiteral("127.0.0.1"));   // 全空白
-    QCOMPARE(store.loadHost().bitrateBps, 8 * 1000 * 1000);
+    QCOMPARE(store.loadHost().bitrateBps, lanrdp::HostSession{}.bitrateBps);
+    // 老版本 ini 里没有这个键。缺键必须读成「开」—— 读成「关」等于升级之后
+    // 所有人静默退回 CPU 直读，而画面上看不出任何异常，只是慢了一倍。
+    QVERIFY2(store.loadHost().gpuConvert, "缺键应当回落成「启用显卡」");
 
     {
         QSettings ini(store.filePath(), QSettings::IniFormat);
         ini.setValue(QStringLiteral("host/bitrateBps"), 100 * 1000 * 1000 + 1);
         ini.sync();
     }
-    QCOMPARE(store.loadHost().bitrateBps, 8 * 1000 * 1000);
+    QCOMPARE(store.loadHost().bitrateBps, lanrdp::HostSession{}.bitrateBps);
 }
 
 // 空路径 = 停用。测试与自动化默认走这条，它们绝不能读写真实配置。

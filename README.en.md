@@ -40,7 +40,7 @@ external services, no installer.
   drop every connected viewer in one keystroke — nobody can connect again until you start listening
 - **Automatic reconnect** with backoff (on by default), plus heartbeat-based dead-peer detection
 - **Adaptive bitrate**: adjusts to network conditions; the cap is selectable in
-  *Start Listening…* (4 / 8 / 12 / 16 Mbps, default 8)
+  *Start Listening…* (4 / 8 / 12 / 16 Mbps, default 12)
 - **Tray residency** (optional, off by default): minimizing or closing the window moves it to the
   notification area and sharing continues
 - **Single instance** (optional, off by default): launching again focuses the existing window

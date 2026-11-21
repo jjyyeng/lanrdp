@@ -3,6 +3,7 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QAction>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QDialogButtonBox>
@@ -163,6 +164,8 @@ private slots:
     void settingsDialogHoldsTheGlobalSwitches();
     // 码率上限要能在界面上设，且命令行给的非标准值不能被悄悄改掉
     void hostDialogCarriesBitrateCap();
+    void hostDialogCarriesGpuConversionSwitch();
+    void hostDialogIsFullyEnglish();
     // 被控端口令不得为空
     void hostDialogRejectsEmptyPassword();
     // 控制端地址不得为空
@@ -1786,6 +1789,73 @@ void TestMainWindowUi::sendFileButtonShowsPendingClipboardFiles()
 // ① 界面上能设（否则只有知道命令行的人才能改，且每次启动都要重打一遍）；
 // ② 命令行给的非标准值要原样带回来 —— 四舍五入到最近档等于静默改掉用户设过的数字；
 // ③ 勾掉压缩传输时置灰（裸帧路径没有码率可调，留着能点会让人以为改了有用）。
+// 「使用显卡做色彩转换」：默认勾上、能关，而且**必须显示上一次实际走的路径**。
+//
+// 最后那条才是重点：显卡路径的失败全是静默的（驱动不给 VideoProcessor、色彩空间
+// 被忽略），勾着却降级时用户能看到的只有「变慢」。没有这行字，这个开关就是在撒谎。
+void TestMainWindowUi::hostDialogCarriesGpuConversionSwitch()
+{
+    using lanrdp::HostConfigDialog;
+
+    // 默认：勾着。新装与「老 ini 缺键」都该落到这里。
+    {
+        HostConfigDialog dlg(HostConfigDialog::Config{});
+        auto *check = dlg.findChild<QCheckBox *>(QStringLiteral("gpuConvertCheck"));
+        QVERIFY2(check, "【开始监听…】应当有显卡转换开关（objectName=gpuConvertCheck）");
+        QVERIFY2(check->isChecked(), "默认应当是「用显卡」");
+        QVERIFY2(dlg.config().gpuConvert, "config() 也要带回默认的「开」");
+    }
+
+    // 关掉之后要能原样带回去（否则点了确定等于没点）
+    {
+        HostConfigDialog::Config cfg;
+        cfg.gpuConvert = false;
+        HostConfigDialog dlg(cfg);
+        QVERIFY2(!dlg.config().gpuConvert, "取消勾选后 config() 仍报「开」");
+    }
+
+}
+
+void TestMainWindowUi::hostDialogIsFullyEnglish()
+{
+    using lanrdp::HostConfigDialog;
+
+    // 切到英文后重开一次【开始监听…】：里面任何一个控件都不该还留着中文。
+    // 这些句子都在构造时 tr() 一次就写死了，翻译表漏一条就永远是中文 ——
+    // 翻代码看不出来，只有把整棵控件树的文字摊开数一遍才知道。
+    QVERIFY2(lanrdp::setUiLanguage(lanrdp::UiLanguage::English), "切到英文应当成功");
+    HostConfigDialog dlg(HostConfigDialog::Config{});
+
+    const QRegularExpression han(QStringLiteral("[\\x{4e00}-\\x{9fff}]"));
+    QStringList              leftovers;
+    auto add = [&](const QString &where, const QString &text) {
+        if (han.match(text).hasMatch())
+            leftovers << QStringLiteral("%1 = %2").arg(where, text);
+    };
+
+    add(QStringLiteral("windowTitle"), dlg.windowTitle());
+    for (QWidget *w : dlg.findChildren<QWidget *>()) {
+        const QString tag =
+            w->objectName().isEmpty() ? QString::fromLatin1(w->metaObject()->className())
+                                      : w->objectName();
+        add(tag + QStringLiteral(".toolTip"), w->toolTip());
+        if (auto *label = qobject_cast<QLabel *>(w))
+            add(tag, label->text());
+        if (auto *button = qobject_cast<QAbstractButton *>(w))
+            add(tag, button->text());
+        if (auto *edit = qobject_cast<QLineEdit *>(w))
+            add(tag + QStringLiteral(".placeholder"), edit->placeholderText());
+        if (auto *combo = qobject_cast<QComboBox *>(w)) {
+            for (int i = 0; i < combo->count(); ++i)
+                add(tag + QStringLiteral(".item%1").arg(i), combo->itemText(i));
+        }
+    }
+
+    lanrdp::setUiLanguage(lanrdp::UiLanguage::Chinese);
+    QVERIFY2(leftovers.isEmpty(),
+             qPrintable(QStringLiteral("英文界面里还留着中文：\n") + leftovers.join(QLatin1Char('\n'))));
+}
+
 void TestMainWindowUi::hostDialogCarriesBitrateCap()
 {
     using lanrdp::HostConfigDialog;
@@ -1795,7 +1865,7 @@ void TestMainWindowUi::hostDialogCarriesBitrateCap()
         HostConfigDialog dlg(HostConfigDialog::Config{});
         auto *combo = dlg.findChild<QComboBox *>(QStringLiteral("bitrateCombo"));
         QVERIFY2(combo, "【开始监听…】应当有码率下拉（objectName=bitrateCombo）");
-        QCOMPARE(dlg.config().bitrateBps, 8 * 1000 * 1000);
+        QCOMPARE(dlg.config().bitrateBps, HostConfigDialog::Config{}.bitrateBps);
         QVERIFY2(combo->count() >= 4, "码率至少要有 4 个档位");
     }
 

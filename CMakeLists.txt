@@ -71,6 +71,10 @@ add_library(lanrdp_core STATIC
     host/AudioCapturer.cpp
     # Phase 19（⑨ 自适应码率）：积压→码率/帧率的策略纯函数
     host/AdaptiveBitrate.cpp
+    # BGRA -> NV12 的加速（GPU VideoProcessor / CPU 直读）。
+    # 4K 下实测「抓屏 + 色彩转换」占一拍 40 ms 中的 25 ms，主体是两次 33 MB 的
+    # CPU 全量搬运；本类把它们整段省掉。
+    host/Nv12Converter.cpp
     host/TokenGate.cpp
     viewer/KeyMap.cpp
     viewer/H264Decoder.cpp
@@ -330,6 +334,12 @@ lanrdp_add_test(test_h264frame
 
 lanrdp_add_test(test_colorconvert
     SOURCES tests/test_colorconvert.cpp
+    LABELS "unit"
+)
+
+# BGRA -> NV12 加速器：CPU 参考实现与显卡路径（显卡不可用的机器上自动 skip）
+lanrdp_add_test(test_nv12converter
+    SOURCES tests/test_nv12converter.cpp
     LABELS "unit"
 )
 

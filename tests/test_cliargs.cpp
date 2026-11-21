@@ -71,7 +71,7 @@ void TestCliArgs::defaultsToGuiMode()
     QCOMPARE(o.sendWaitMs, 400);
     QCOMPARE(o.holdTokenMs, 0);
     QCOMPARE(o.tokenWaitMs, 2000);
-    QCOMPARE(o.bitrateBps, 8 * 1000 * 1000);
+    QCOMPARE(o.bitrateBps, 12 * 1000 * 1000);   // 默认 12 Mbps（Phase 34：20 fps 下每帧要更多字节）
 
     QVERIFY(o.password.isEmpty());
     QVERIFY(o.peerHost.isEmpty());
@@ -315,7 +315,7 @@ void TestCliArgs::invalidBitrateFallsBackToDefault()
     const lanrdp::CliParseResult r = parse({ QStringLiteral("--bitrate"),
                                              QStringLiteral("abc") });
     QVERIFY2(r.ok, qPrintable(r.error));
-    QCOMPARE(r.options.bitrateBps, 8 * 1000 * 1000);
+    QCOMPARE(r.options.bitrateBps, lanrdp::CliOptions{}.bitrateBps);   // 回默认，不写死数值
 }
 
 QTEST_GUILESS_MAIN(TestCliArgs)

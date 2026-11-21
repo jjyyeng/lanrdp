@@ -128,6 +128,37 @@ public:
     quint64 bytesSent() const { return bytesSent_; }
     void    resetStats();
 
+    // ---- 性能打点（默认关）----
+    //
+    // 只读计时器，**不改变任何行为**。打开后每 kProfileSamples 个有效帧（抓屏成功
+    // 的拍）汇总一行，经 perfSample() 发出：抓屏 / 色彩转换 / 编码 / 扇出各段的
+    // p50 与 p95，外加拍间隔与每拍注入事件数。
+    //
+    // 存在的理由只有一个：4K 下单拍实测 ≈45 ms，而「帧率能不能从
+    // 10 提到 20」完全取决于这 45 ms 里谁最贵 —— 编码贵只能上硬编，转换贵才值得
+    // 做 GPU NV12。不打点就只能猜，而两条路的成本差 3 倍。
+    //
+    // 默认值来自构造时的环境变量 `LANRDP_PERF=1`（运行时开关，不必改代码）。
+    void setProfilingEnabled(bool on);
+    bool profilingEnabled() const { return profiling_; }
+
+    // 「本机预览要一张 QImage」= 抓屏走老路（先出 QImage，再转 NV12）。
+    // 默认 false ⇒ H.264 路径走 captureNv12 的快速路径（少一次 33 MB 往返）。
+    // ⚠️ 预览开着时**必须**关掉快速路径：`frameCaptured` 送的就是那张 QImage。
+    // 预览是诊断功能，为它多花 12 ms 可以接受；主链路不能被它拖慢。
+    void setPreviewImageRequired(bool on);
+    bool previewImageRequired() const { return previewImageRequired_; }
+
+    // 设置里的「使用显卡做色彩转换」。默认开；关掉只是慢，画面不变。
+    // 与预览开关不同，这一项**随时可切**：抓屏器不用重建，下一帧就生效。
+    void setGpuConversionEnabled(bool on);
+    bool gpuConversionEnabled() const { return gpuConversionEnabled_; }
+
+    // 注入计数器来源（打点用，与 setPendingSource 同一注入手法）。返回**累计**
+    // 注入事件数；样本里报「每拍平均注入几个」。空 = 不报这一项。
+    // 用途：区分「帧率低」和「注入堆在拍之间」两种不同的卡 —— 后者才是拆线程的依据。
+    void setInjectedCounter(std::function<quint64()> counter);
+
     // 抓屏源描述（内置 DXGI 抓屏初始化成功后才有效）
     QString sourceInfo() const;
 
@@ -136,7 +167,12 @@ public:
     QRect capturedRect() const;
 
 signals:
-    void frameCaptured(const QImage &frame);  // 被控端本地预览用
+    void frameCaptured(const QImage &frame);  // 被控端本地预览用（仅 QImage 路径）
+    // 帧尺寸（状态栏的分辨率口径）。**与 frameCaptured 无关**：NV12 快速路径
+    // 不产出 QImage，尺寸只能单独报，否则状态栏在正常使用时永远是空的。
+    void frameSizeChanged(QSize size);
+    // 抓屏路径的一条说明（如「显卡色彩转换已启用 / 已降级」）。只在首次产生时发一次。
+    void captureNote(const QString &note);
     void failed(const QString &error);
     void codecFallback(const QString &reason);  // H.264 不可用，已退回裸帧
     // 编码器能力受限的非致命说明（如没有 ICodecAPI）。只在首次产生时发一次。
@@ -151,11 +187,23 @@ signals:
     void captureInterrupted(const QString &reason);
     void captureResumed();
 
+    // 性能样本（一行文本，已格式化）。只有 profiling_ 打开时才发。
+    // ⚠️ 不走 qWarning：全仓没有 qInstallMessageHandler，qWarning 只到 stderr，
+    // **不进** lanrdp.log —— 那正是事后唯一能看到它的地方。
+    void perfSample(const QString &line);
+
 private slots:
     void onTick();
 
 private:
     CaptureStatus captureFrame(QImage *out, QString *error);
+    // 直接产出紧凑 NV12（显卡可用则走显卡）。自定义帧源（测试）仍按 QImage 转。
+    CaptureStatus captureFrameNv12(QByteArray *out, int *width, int *height, QString *error);
+    // 惰性创建内置抓屏器。返回 false 时 *status 就是该上报的抓屏状态。
+    bool ensureCapturer(CaptureStatus *status, QString *error);
+    // 抓屏失败后作废抓屏器（下个 tick 惰性重建），把状态与原因原样回给调用方
+    CaptureStatus dropCapturerAndReport(CaptureStatus status, const QString &captureError,
+                                       QString *error);
     void dropEncoder();
 
     // 一次抓帧失败后的处置（限频重试 / 可恢复失效永不放弃 / 其他失败连续 N 次才停）
@@ -175,26 +223,57 @@ private:
     // 遍历结束后统一移除「持续超标」的目标并发 targetCongested
     void dropCongestedTargets();
 
+    // 把一段现成的紧凑 NV12 编成 H.264（快速路径的正路：不再经过 QImage）
+    bool encodeH264Nv12(const QByteArray &nv12, int width, int height,
+                        QVector<H264EncodedFrame> *out, QString *error);
+
+    // 把编码出的若干单元扇出给所有目标
+    void sendH264Units(const QVector<H264EncodedFrame> &units, int width, int height);
+
     // 把一帧 BGRA 编成 H.264（内部完成 BGRA->NV12）；编码器有延迟，可能没有产出。
     bool encodeH264(const QImage &frame, QVector<H264EncodedFrame> *out, QString *error);
+
+    // 一拍的分段耗时（微秒）。只在 profiling_ 为真时被填写。
+    struct TickProfile
+    {
+        qint64 captureUs = 0;   // 抓屏（含 AcquireNextFrame 等待）
+        qint64 convertUs = 0;   // BGRA -> NV12
+        qint64 encodeUs  = 0;   // MF encodeFrame（含流水线等待）
+        qint64 sendUs    = 0;   // 序列化 + 扇出到各 Session
+        qint64 periodUs  = 0;   // 距上一拍的间隔（tick 有没有被别的活拖后）
+        qint64 injected  = 0;   // 本拍期间注入的事件数
+
+        qint64 totalUs() const { return captureUs + convertUs + encodeUs + sendUs; }
+    };
+
+    // 一拍收尾：攒够 kProfileSamples 就汇总一行并发 perfSample()。
+    void profileTickSnapshot();
 
     QTimer            *timer_      = nullptr;
     ScreenCapturer    *capturer_   = nullptr;  // 惰性创建（首次真正需要时）
     int                outputIndex_ = -1;      // -1 = 主屏优先（见 setOutputIndex）
     FrameSource        source_;
     QVector<Session *> targets_;
-    int                intervalMs_ = 100;
+    int                intervalMs_ = 50;
     quint64            framesSent_ = 0;
     quint64            bytesSent_  = 0;
 
     StreamCodec                  codec_          = StreamCodec::RawFrames;
-    int                          h264Fps_        = 15;
-    int                          h264Bitrate_    = 8 * 1000 * 1000;
+    int                          h264Fps_        = 20;
+    int                          h264Bitrate_    = 12 * 1000 * 1000;
     int                          h264GopSeconds_ = 2;
     std::unique_ptr<H264Encoder> encoder_;
     bool                         forceKeyframe_  = true;
     bool                         h264Warned_     = false;
     QString                      codecNote_;      // 编码器能力受限说明（见 codecNote()）
+    // 预览要 QImage ⇒ 放弃 NV12 快速路径（见 setPreviewImageRequired）
+    bool                         previewImageRequired_ = false;
+    // 允许用显卡做色彩转换（见 setGpuConversionEnabled）
+    bool                         gpuConversionEnabled_ = true;
+    // 「抓屏走的是显卡还是 CPU」只报一次。默认 false ⇒ 快速路径可用。
+    bool                         capturePathNoted_    = false;
+    // 打点行里的 path 标记（NV12 / QImage），只在 profiling_ 下更新
+    QString                      perfPath_;
 
     // 暂停位（隐私遮挡）。**跨 start/stop 保持** —— 用户是在遮挡状态下
     // 停掉监听又再开的，推流不该悄悄恢复（见 HostController::start 里的重锁）。
@@ -204,7 +283,7 @@ private:
     std::function<qint64()> pendingSource_;         // 积压来源（空 = 读真实 targets）
     int  adaptiveBitrate_ = 0;                       // 当前自适应码率（0 = 未开始，用 h264Bitrate_）
     int  adaptiveFps_     = 0;                       // 当前自适应 fps（0 = 未开始，由 intervalMs_ 派生）
-    int  baseIntervalMs_  = 100;                     // 基准抓帧间隔（fps 恢复目标）
+    int  baseIntervalMs_  = 50;                      // 基准抓帧间隔（fps 恢复目标）
     bool initialBitrateApplied_ = false;             // 首帧后是否已 setBitrate 真实码率
 
     // 抓屏失败后的重试状态
@@ -225,6 +304,17 @@ private:
     static constexpr qint64 kMaxPendingBytes = 8 * 1024 * 1024;
     // 持续超标多久后放弃该目标（毫秒，**墙钟**，与抓帧间隔和出帧率无关）。
     static constexpr int kMaxCongestionMs = 5000;
+
+    // ---- 性能打点状态（默认全关，profiling_ 为假时一个计时器都不启动）----
+    static constexpr int kProfileSamples = 25;   // 攒多少拍汇总一行（100 ms 拍 ≈ 2.5 s）
+    bool                     profiling_ = false;
+    std::function<quint64()> injectedCounter_;
+    quint64                  lastInjectedRef_ = 0;
+    QElapsedTimer            tickClock_;     // 拍间隔
+    QElapsedTimer            stageClock_;    // 拍内分段（capture / send 两段共用）
+    QElapsedTimer            codecClock_;    // encodeH264 内分段（convert / encode）
+    TickProfile              tickProfile_;   // 当前拍已量到的值
+    QVector<TickProfile>     profileSamples_;
 };
 
 } // namespace lanrdp

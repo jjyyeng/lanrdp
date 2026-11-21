@@ -55,7 +55,10 @@ public:
         bool    useH264     = true;
         // 压缩传输的码率上限（bps）。自适应只在这个值**以下**调节，所以它是天花板
         // 而非固定值：设 16 Mbps 不代表一定发 16 Mbps，网络差时会自己降。
-        int     bitrateBps  = 8 * 1000 * 1000;
+        int     bitrateBps  = 12 * 1000 * 1000;
+        // 用显卡做 BGRA -> NV12 的色彩转换。关掉后 4K 每帧多约 10 ms，
+        // 只在「怀疑显卡路径有问题、要现场排除它」时关。
+        bool    gpuConvert  = true;
     };
 
     explicit HostConfigDialog(const Config &initial, QWidget *parent = nullptr);
@@ -87,6 +90,7 @@ private:
     QLabel    *passwordError_ = nullptr;
     QLineEdit *recvDir_       = nullptr;
     QCheckBox *h264_          = nullptr;
+    QCheckBox *gpuConvert_    = nullptr;
     QComboBox *bitrate_       = nullptr;
     QPushButton *invite_      = nullptr;
     // 构造时枚举一次：邀请串里的地址行用它，按钮可用性也用它。
