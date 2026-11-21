@@ -245,6 +245,20 @@ bool ScreenStreamer::isRunning() const
     return timer_->isActive();
 }
 
+void ScreenStreamer::setPaused(bool paused)
+{
+    if (paused_ == paused)
+        return;
+
+    paused_ = paused;
+
+    // 只处理「恢复」这一侧：暂停不需要做任何事（下一次 tick 自己就不干活了），
+    // 而恢复必须强制 IDR —— 停发帧期间编码器的时间轴还在走，继续发 P 帧
+    // 会让控制端拿着过期参考帧解不出画面。
+    if (!paused_)
+        dropEncoder();
+}
+
 void ScreenStreamer::resetStats()
 {
     framesSent_ = 0;
@@ -420,6 +434,11 @@ void ScreenStreamer::onTick()
 {
     if (targets_.isEmpty())
         return;  // 没有观看者就不抓屏，省 CPU
+
+    // 隐私遮挡：一帧都不抓、一帧都不发。放在背压巡检**之前** —— 暂停期间
+    // 没有发帧，积压只会往外排，这时候去判「谁太慢」纯属无中生有。
+    if (paused_)
+        return;
 
     // 背压巡检先于抓帧：桌面静止时本 tick 可能拿不到新帧（下面直接 return），
     // 卡死的接收端不能因此逃过判定。

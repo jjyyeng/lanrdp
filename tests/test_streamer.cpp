@@ -45,6 +45,9 @@ private slots:
     void switchingToSameOutputIsNoop();
     void requestKeyframeIsConsumedByNextFrame();
     void switchingOutputKeepsFramesFlowing();
+
+    // 隐私遮挡：暂停期间不抓不发，恢复必须强制 IDR
+    void pauseStopsFramesAndResumeForcesKeyframe();
 };
 
 namespace {
@@ -765,6 +768,63 @@ void TestStreamer::switchingOutputKeepsFramesFlowing()
     streamer.setOutputIndex(1);
     QTRY_VERIFY_WITH_TIMEOUT(received.size() >= before + 2 * frameBytes, 5000);
     QVERIFY(streamer.isRunning());
+
+    streamer.stop();
+}
+
+// 隐私遮挡的推流侧。两件事各守一条：
+// · 暂停期间**连抓屏都不做**（不是「抓了但不发」）—— 否则暂停的这段时间会
+//   悄悄积累一堆没人要的帧；
+// · 恢复时**必须**强制 IDR。不这么做控制端要花屏到下一个自然关键帧，
+//   而遮挡解除的那一刻正是机主最希望对方立刻看清的时刻。
+void TestStreamer::pauseStopsFramesAndResumeForcesKeyframe()
+{
+    QTcpServer  server;
+    QTcpSocket  client;
+    QTcpSocket *serverSide = makeLoopbackServerSide(&server, &client);
+    QVERIFY(serverSide != nullptr);
+    lanrdp::Session session(serverSide);
+
+    QByteArray received;
+    QObject::connect(&client, &QTcpSocket::readyRead,
+                     [&received, &client]() { received.append(client.readAll()); });
+
+    int captures = 0;
+    lanrdp::ScreenStreamer streamer;
+    streamer.setSource([&captures](QImage *out) {
+        ++captures;
+        *out = makeImage(64, 48);
+        return lanrdp::CaptureStatus::Ok;
+    });
+    streamer.setIntervalMs(10);
+    streamer.setCodec(lanrdp::StreamCodec::H264);
+    streamer.addTarget(&session);
+    streamer.start();
+
+    // 先跑进稳态：开局那次「新观看者必须 IDR」得先被消费掉，
+    // 之后 keyframeRequested() 才能当作「恢复时有没有强制 IDR」的判据。
+    QTRY_VERIFY_WITH_TIMEOUT(!received.isEmpty(), 5000);
+    if (!streamer.h264Active())
+        QSKIP("本机没有可用的 H.264 编码器，跳过");
+    QTRY_VERIFY_WITH_TIMEOUT(!streamer.keyframeRequested(), 10000);
+
+    QVERIFY(!streamer.isPaused());
+
+    streamer.setPaused(true);
+    QVERIFY(streamer.isPaused());
+
+    QTest::qWait(80);   // 让已经在路上的那一个 tick 走完
+    const int     capturesAtPause = captures;
+    const quint64 framesAtPause   = streamer.framesSent();
+
+    QTest::qWait(200);
+    QCOMPARE(captures, capturesAtPause);            // 暂停期间不抓屏
+    QCOMPARE(streamer.framesSent(), framesAtPause); // 更不发帧
+
+    streamer.setPaused(false);
+    QVERIFY2(streamer.keyframeRequested(),
+             "恢复后必须强制 IDR，否则控制端要花屏到下一个自然关键帧");
+    QTRY_VERIFY_WITH_TIMEOUT(streamer.framesSent() > framesAtPause, 5000);
 
     streamer.stop();
 }

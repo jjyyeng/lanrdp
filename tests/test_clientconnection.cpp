@@ -1,9 +1,11 @@
 #include <QtTest/QtTest>
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QNetworkProxy>
 #include <QRegularExpression>
 #include <QSet>
@@ -20,6 +22,7 @@
 #include "net/HostServer.h"
 #include "net/Session.h"
 #include "protocol/Clipboard.h"
+#include "protocol/FileTransfer.h"
 
 // ClientConnection 的**通用行为**测试。
 //
@@ -54,6 +57,8 @@ private slots:
     void failedFileAbandonsTheRestOfTheBatch();
     // 剪贴板里的一批文件：先清单、再文件，两者必须指向同一批
     void sendClipboardFilesSendsManifestThenFiles();
+    // 反向（被控端 → 控制端）：只有本端持着操作权时才把文件写到本机硬盘
+    void fileFramesRequireTheInputToken();
 };
 
 // 传输 id 从随机值起步、同连接内递增。
@@ -573,6 +578,89 @@ void TestClientConnection::sendClipboardFilesSendsManifestThenFiles()
     QVERIFY(!conn.sendClipboardFiles(tooMany));
     QVERIFY2(!logs.isEmpty() && logs.last().contains(QStringLiteral("64")),
              qPrintable(logs.isEmpty() ? QStringLiteral("没有日志") : logs.last()));
+
+    conn.disconnectNow();
+}
+
+// 反向传文件（被控端 → 控制端）：本端必须**持着操作权**才收。
+//
+// 门放在 ClientConnection 而不是只放在发送端：对端可以被换成任何东西，
+// 接收端自己守才算数。正常情况下两道门同开同闭（被控端也只在有人持令牌时发），
+// 所以这里造的正是「门不一样」的那一刻。
+void TestClientConnection::fileFramesRequireTheInputToken()
+{
+    lanrdp::HostServer host(QStringLiteral("secret"));
+    lanrdp::AuthBackoff::Config cfg;
+    cfg.baseDelayMs = 0;
+    cfg.maxDelayMs  = 0;
+    host.setBackoffConfig(cfg);
+    QVERIFY(host.listen(0, QHostAddress::LocalHost));
+
+    lanrdp::Session *peer = nullptr;
+    QObject::connect(&host, &lanrdp::HostServer::clientAuthenticated, &host,
+                     [&peer](lanrdp::Session *session) { peer = session; });
+
+    QTemporaryDir recvDir;
+    QVERIFY(recvDir.isValid());
+
+    lanrdp::ClientConnection conn;
+    conn.setReceiveDir(recvDir.path());
+    QStringList landed;
+    QObject::connect(&conn, &lanrdp::ClientConnection::fileReceived, &conn,
+                     [&landed](bool ok, const QString &path, const QString &) {
+                         if (ok)
+                             landed.append(path);
+                     });
+
+    conn.connectTo(QStringLiteral("127.0.0.1"), host.port(), QStringLiteral("secret"));
+    QTRY_VERIFY(conn.ready());
+    QTRY_VERIFY(peer != nullptr);
+    QVERIFY2(!conn.hasToken(), "被控端没发令牌时本端不该自认为持有操作权");
+
+    // 一小份完整的文件（HEADER + 一块 CHUNK + END），够走完落盘与 sha 校验。
+    const QByteArray body = QByteArrayLiteral("reverse-direction-payload");
+    const auto sendWholeFile = [&body](lanrdp::Session *s, const QString &name) {
+        lanrdp::FileHeader header;
+        header.transferId = 42;
+        header.name       = name;
+        header.totalSize  = quint64(body.size());
+        s->sendFrame(static_cast<std::uint8_t>(lanrdp::FrameType::FileHeader),
+                     lanrdp::encodeFileHeader(header));
+
+        lanrdp::FileChunk chunk;
+        chunk.transferId = 42;
+        chunk.offset     = 0;
+        chunk.data       = body;
+        s->sendFrame(static_cast<std::uint8_t>(lanrdp::FrameType::FileChunk),
+                     lanrdp::encodeFileChunk(chunk));
+
+        lanrdp::FileEnd end;
+        end.transferId = 42;
+        end.bytesSent  = quint64(body.size());
+        end.sha256     = QCryptographicHash::hash(body, QCryptographicHash::Sha256);
+        s->sendFrame(static_cast<std::uint8_t>(lanrdp::FrameType::FileEnd),
+                     lanrdp::encodeFileEnd(end));
+    };
+
+    // ① 没有操作权：整份文件都不该落盘，也不该留下任何痕迹
+    sendWholeFile(peer, QStringLiteral("不给.txt"));
+    QTest::qWait(600);
+    QVERIFY2(landed.isEmpty(), "没持操作权时不该往本机硬盘写文件");
+    QCOMPARE(QDir(recvDir.path()).entryList(QDir::Files).size(), 0);
+
+    // ② 拿到操作权：同样的帧就要落地、内容与 sha 都要对上
+    lanrdp::Frame grant;
+    grant.type = static_cast<std::uint8_t>(lanrdp::FrameType::TokenGrant);
+    peer->sendFrame(grant);
+    QTRY_VERIFY(conn.hasToken());
+
+    sendWholeFile(peer, QStringLiteral("给我.txt"));
+    QTRY_COMPARE_WITH_TIMEOUT(landed.size(), 1, 15000);
+
+    QCOMPARE(QFileInfo(landed.first()).fileName(), QStringLiteral("给我.txt"));
+    QFile back(landed.first());
+    QVERIFY(back.open(QIODevice::ReadOnly));
+    QCOMPARE(back.readAll(), body);
 
     conn.disconnectNow();
 }

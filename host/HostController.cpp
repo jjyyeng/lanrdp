@@ -7,6 +7,7 @@
 #include "host/ScreenCapturer.h"
 #include "host/ScreenStreamer.h"
 #include "net/FileReceiver.h"
+#include "net/FileSendQueue.h"
 #include "net/HostServer.h"
 #include "net/Session.h"
 #include "protocol/InputEvent.h"
@@ -202,6 +203,15 @@ bool HostController::start(quint16 port, const QString &password)
     // 应用当前的编码选择（无论 streamer_ 是新建还是复用）。
     applyCodec();
 
+    // 遮挡还开着（用户在遮挡期间停过监听又再开）：锁必须重新落下 ——
+    // stop() 会清锁，而「本机黑着屏、对端却能操作」是最糟的一种状态。
+    // 推流的暂停位不用重设：它挂在 streamer_ 上，stop() 只停定时器、不清暂停位。
+    // 这里直接锁门而不用 takeInput()：还没人会连上来，那句「原持有者」日志是噪音。
+    if (curtainOn_) {
+        curtainLockedInput_ = true;
+        tokenGate_.lock();
+    }
+
     // 多屏：每次开始监听都回到主屏。选屏是**本次会话的临时状态**，不落盘
     //（与界面里那两项全局偏好同规矩），上一轮有人切到屏 2 不该影响下一轮。
     if (streamer_)
@@ -224,6 +234,13 @@ bool HostController::start(quint16 port, const QString &password)
     connect(host_, &HostServer::clientAuthenticated, this, &HostController::handleAuthenticated);
     connect(host_, &HostServer::clientRejected, this, &HostController::handleRejected);
     connect(host_, &HostServer::clientDisconnected, this, &HostController::handleDisconnected);
+
+    // 来源不在局域网：连接被直接掐掉，但必须留痕 —— 否则「另一台机器怎么都连不上」
+    // 会被当成程序坏了，而真实原因是它走了 VPN / 另一个网段（0.0.0.0 让这些路也通）。
+    connect(host_, &HostServer::peerOutsideLan, this, [this](const QString &sourceIp) {
+        emit logLine(QStringLiteral("已拒绝来自 %1 的连接：不在本机任何局域网网卡所在的子网内")
+                         .arg(sourceIp));
+    });
 
     if (!host_->listen(port)) {
         // 具体原因已由 listenFailed 那一路给出，这里只回「起不来」。
@@ -386,10 +403,12 @@ void HostController::handleAuthenticated(Session *session)
 
     // 音频：与画面扇出同一时刻接线（都在「已鉴权」之后）。
     // 采集只在**第一个**目标接入时起 —— 四个人分别接进来不该起停四次设备。
+    // ⚠️ 遮挡期间例外：那时采集刚被特意停掉，这里若无条件拉起就成了
+    // 「盖着黑布开始送声音」—— 而且事后只看到一行「控制端已通过鉴权」，极难联想。
     if (audio_) {
         const bool firstAudioTarget = (audio_->targetCount() == 0);
         audio_->addTarget(session);
-        if (firstAudioTarget && audioCapturer_ && !audioCapturer_->isRunning())
+        if (firstAudioTarget && audioCapturer_ && !curtainOn_ && !audioCapturer_->isRunning())
             audioCapturer_->startCapture();
     }
 
@@ -440,6 +459,10 @@ void HostController::handleDisconnected(Session *session)
     // ⚠️ 只收掉**断开这条连接自己那一份** —— 接收器按来源隔离，别连累别人。
     if (fileReceiver_)
         fileReceiver_->abort(session);
+
+    // 反向发送：正在发给这个人的那一批也停掉（目标已经没了）。
+    if (senderToHolder_ && senderToHolder_->session() == session)
+        abortSenderToHolder();
 
     // 音频：先摘这一个目标；最后一个听的人走了就把采集停掉（把设备还回去）。
     if (audio_) {
@@ -596,6 +619,65 @@ void HostController::sendClipboardFrame(const Frame &frame)
         holder->sendFrame(frame);
 }
 
+// 反向发文件：机主那一侧的文件 → 正在操作本机的那一端。
+//
+// 门是「有人持令牌」。这不是对称照搬控制端那条规则（那边是「持有者才能往
+// 被控端写」），而是这里唯一说得通的口径：没人操作时把机主的文件推给一个
+// 只看着屏幕的人，等于绕过「谁在操作」这条线。
+//
+// `clipboardBatch` 决定发不发 `CLIPBOARD_FILES` 清单：剪贴板那批要靠清单让
+// 对端「凑齐了写进剪贴板」，而机主手挑的那几个只是文件 —— 多带一帧清单会让
+// 对方把它们塞进剪贴板，等于替对方改剪贴板。
+bool HostController::startSendToHolder(const QStringList &paths, bool clipboardBatch,
+                                       const QString &what)
+{
+    if (paths.isEmpty())
+        return false;
+
+    Session *holder = holderSession();
+    if (!holder) {
+        emit logLine(QStringLiteral("%1的 %2 个文件没有发出去：当前没有控制端在操作本机")
+                         .arg(what)
+                         .arg(paths.size()));
+        emit statusText(tr("没有控制端在操作本机，文件没有发出去"));
+        return false;
+    }
+
+    if (!senderToHolder_) {
+        senderToHolder_ = new FileSendQueue(this);
+        connect(senderToHolder_, &FileSendQueue::started, this,
+                &HostController::fileSendStarted);
+        connect(senderToHolder_, &FileSendQueue::progress, this,
+                &HostController::fileSendProgress);
+        connect(senderToHolder_, &FileSendQueue::finished, this,
+                &HostController::fileSendFinished);
+        connect(senderToHolder_, &FileSendQueue::logMessage, this, &HostController::logLine);
+    }
+
+    // 换人持有 ⇒ 上一批立刻中止（`setSession` 内部 abort），不让它继续发给新人。
+    senderToHolder_->setSession(holder);
+    return clipboardBatch ? senderToHolder_->enqueueClipboardBatch(paths)
+                          : senderToHolder_->enqueue(paths);
+}
+
+bool HostController::sendClipboardFilesToHolder(const QStringList &paths)
+{
+    return startSendToHolder(paths, true, QStringLiteral("剪贴板里"));
+}
+
+bool HostController::sendFilesToHolder(const QStringList &paths)
+{
+    return startSendToHolder(paths, false, QStringLiteral("要发"));
+}
+
+void HostController::abortSenderToHolder()
+{
+    if (!senderToHolder_)
+        return;
+    senderToHolder_->abort();
+    senderToHolder_->setSession(nullptr);
+}
+
 QVector<HostController::ClientInfo> HostController::clients() const
 {
     QVector<ClientInfo> out;
@@ -655,6 +737,8 @@ void HostController::takeInput()
     tokenGate_.release(tokenOf(holder));
     // 收回时对方可能正按着鼠标 —— 补一针松开，别把被控端卡在按下态。
     releaseStuckInput(QStringLiteral("收回操作权"));
+    // 正在发给他的那批文件也停下：对方已经不在操作了，剩下的帧会被它按门拒收。
+    abortSenderToHolder();
     if (holder)
         holder->sendFrame(static_cast<std::uint8_t>(FrameType::TokenRelease));
 
@@ -675,6 +759,58 @@ void HostController::unlockInput()
     notifyUi();
 }
 
+// 隐私遮挡：停发帧 + 停声音 + 收回操作权。本机那层黑窗不在这里 —— 那是 UI 的事，
+// 而这两件必须落在宿主线程：推流器与令牌门都只归这条线程管。
+void HostController::setPrivacyCurtain(bool on)
+{
+    if (curtainOn_ == on)
+        return;   // 幂等：热键点两下 / 菜单与热键同一拍，都不该翻回去
+
+    curtainOn_ = on;
+
+    if (on) {
+        // 「本来就锁着」要记下来 —— 否则退出遮挡时会替机主做了一次它没要求的解锁。
+        curtainLockedInput_ = !tokenGate_.isLocked();
+        if (curtainLockedInput_)
+            takeInput();   // 复用现成三段式：补松开 / 通知对端 / 落日志
+
+        if (streamer_)
+            streamer_->setPaused(true);
+
+        // 音频是**另一条独立线**（AudioCapturer → AudioStreamer），setPaused 管不到它。
+        // 只停画面不停声音等于「捂住眼睛没捂住嘴」：对方听得出机主在放什么。
+        if (audioCapturer_ && audioCapturer_->isRunning()) {
+            audioCapturer_->stopAndWait();   // 有界（run() 最长阻塞 50 ms）
+            emit logLine(QStringLiteral("音频采集已暂停（遮挡期间不送声音）"));
+        }
+
+        emit logLine(QStringLiteral("已遮挡：本机屏幕变黑，控制端画面定格，操作权已收回"));
+        emit statusText(tr("已遮挡：对方看不到画面、听不到声音，也无法操作本机"));
+        if (!isListening())
+            emit logLine(QStringLiteral("当前没有在监听：遮挡只盖住本机屏幕"));
+    } else {
+        if (streamer_)
+            streamer_->setPaused(false);   // 内部 dropEncoder() ⇒ 下一帧是 IDR
+
+        if (curtainLockedInput_) {
+            unlockInput();
+            curtainLockedInput_ = false;
+        }
+
+        // 遮挡期间可能有人连进来（那时采集被挡着没起），恢复时把设备还回去 ——
+        // 否则要等下一个控制端接入才出声，而那时可能一直没人来。
+        if (audio_ && audioCapturer_ && audio_->targetCount() > 0 && !audioCapturer_->isRunning()) {
+            audioCapturer_->startCapture();
+            emit logLine(QStringLiteral("音频采集已恢复"));
+        }
+
+        emit logLine(QStringLiteral("已解除遮挡：继续推送画面（含声音）"));
+        emit statusText(tr("已恢复：控制端可以重新申请操作"));
+    }
+
+    notifyUi();
+}
+
 // 空闲让出后的善后：通知本人 + 补发松开 + 记一行日志。
 // 两条触发路径（低频定时器 / 有人来抢时的惰性判定）共用这一份。
 void HostController::announceIdleRelease(TokenGate::Token expired)
@@ -687,6 +823,9 @@ void HostController::announceIdleRelease(TokenGate::Token expired)
 
     // 人走了但可能还按着鼠标（最后一条事件是「按下」）—— 补一针松开。
     releaseStuckInput(QStringLiteral("空闲自动让出操作权"));
+
+    // 他不再是持有者了，正在发给他的那批文件也停（对端会按门拒收剩下的帧）。
+    abortSenderToHolder();
 
     emit logLine(QStringLiteral("控制端 %1 已空闲 %2（纯鼠标移动不算操作），自动让出操作权")
                      .arg(idle ? peerName(idle) : QStringLiteral("（已断开）"),

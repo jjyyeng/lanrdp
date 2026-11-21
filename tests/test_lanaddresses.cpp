@@ -23,6 +23,16 @@ private slots:
     void inviteTextCarriesTheThreeFields();
     void inviteTextOmitsThePasswordLineWhenEmpty();
     void inviteTextIsEmptyWithoutAddresses();
+
+    // 入站来源过滤：0.0.0.0 会把 VPN / 热点 / 虚拟机桥接上的对端一并受理，
+    // 能分辨的只有来源地址。
+    void peerInsideLocalSubnetIsAllowed();
+    void peerOutsideSubnetIsRejected();
+    void peerLoopbackIsAlwaysAllowed();
+    void peerMatchesAnyOfSeveralSubnets();
+    void peerMappedIpv4StillMatchesSubnets();
+    void peerIpv6UsesThePrefix();
+    void peerWithoutAnySubnetAllowsOnlyLoopback();
 };
 
 void TestLanAddresses::virtualAdaptersAreRecognised()
@@ -122,6 +132,89 @@ void TestLanAddresses::inviteTextOmitsThePasswordLineWhenEmpty()
 void TestLanAddresses::inviteTextIsEmptyWithoutAddresses()
 {
     QVERIFY(lanrdp::inviteText(QStringList(), 9000, QStringLiteral("secret")).isEmpty());
+}
+
+namespace {
+
+lanrdp::LocalSubnet subnet(const char *network, int prefixLength)
+{
+    return lanrdp::LocalSubnet{QHostAddress(QString::fromLatin1(network)), prefixLength};
+}
+
+} // namespace
+
+// 同一个子网里的对端必须放行 —— 这是本功能唯一要保住的那条路。
+void TestLanAddresses::peerInsideLocalSubnetIsAllowed()
+{
+    const QList<lanrdp::LocalSubnet> subnets = {subnet("192.168.1.0", 24)};
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("192.168.1.7")), subnets));
+    // 本机自己的地址同样在子网内（对端与我们共用一台机器的情形）
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("192.168.1.104")), subnets));
+}
+
+// 别的网段（VPN / 热点 / 隔壁办公网）一律拒。
+void TestLanAddresses::peerOutsideSubnetIsRejected()
+{
+    const QList<lanrdp::LocalSubnet> subnets = {subnet("192.168.1.0", 24)};
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("10.0.0.7")), subnets));
+    // 前缀边界：192.168.2.x 与 192.168.1.0/24 只差在网络位
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("192.168.2.7")), subnets));
+    // /16 与 /24 的区别要真的生效：172.16.0.0/16 收 172.16.255.7
+    const QList<lanrdp::LocalSubnet> wide = {subnet("172.16.0.0", 16)};
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("172.16.255.7")), wide));
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("172.17.0.7")), wide));
+}
+
+// 回环一律放行：单机双开、本机自测（以及所有走 127.0.0.1 的 ctest）都指着它。
+// 哪怕一块网卡都没有，它也必须通。
+void TestLanAddresses::peerLoopbackIsAlwaysAllowed()
+{
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress::LocalHost, {}));
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("127.0.0.5")), {}));
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("::1")), {}));
+}
+
+// 多网卡（有线 + 无线 + 虚拟机桥接）：任一子网命中即放行。
+void TestLanAddresses::peerMatchesAnyOfSeveralSubnets()
+{
+    const QList<lanrdp::LocalSubnet> subnets = {
+        subnet("192.168.1.0", 24),
+        subnet("192.168.11.0", 24),
+        subnet("172.23.96.0", 20),   // 典型的 vEthernet (WSL)
+    };
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("192.168.11.3")), subnets));
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("172.23.100.9")), subnets));
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("192.168.12.3")), subnets));
+}
+
+// 双栈监听下对端常报成 `::ffff:a.b.c.d`；不归一化就会把同网段的机器全挡掉。
+void TestLanAddresses::peerMappedIpv4StillMatchesSubnets()
+{
+    const QList<lanrdp::LocalSubnet> subnets = {subnet("192.168.1.0", 24)};
+    const QHostAddress mapped(QStringLiteral("::ffff:192.168.1.7"));
+    QVERIFY(lanrdp::isPeerAllowed(mapped, subnets));
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("::ffff:10.0.0.7")), subnets));
+}
+
+// IPv6：按前缀长度比，不是按字符串前缀比。
+void TestLanAddresses::peerIpv6UsesThePrefix()
+{
+    const QList<lanrdp::LocalSubnet> subnets = {subnet("fe80::", 64)};
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("fe80::1234:5678:9abc:def0")),
+                                  subnets));
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("2001:db8::1")), subnets));
+    // 前缀只有 32 位时，后半段不同也该放行
+    const QList<lanrdp::LocalSubnet> shortPrefix = {subnet("2001:db8::", 32)};
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("2001:db8:ffff::1")), shortPrefix));
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("2001:db9::1")), shortPrefix));
+}
+
+// 一块可用网卡都没有（网线插着但没拿到 IP）：只留回环那条路。
+// 这**不是**「全拒」—— 全拒会把单机自测也一并打死。
+void TestLanAddresses::peerWithoutAnySubnetAllowsOnlyLoopback()
+{
+    QVERIFY(lanrdp::isPeerAllowed(QHostAddress::LocalHost, {}));
+    QVERIFY(!lanrdp::isPeerAllowed(QHostAddress(QStringLiteral("192.168.1.7")), {}));
 }
 
 QTEST_MAIN(TestLanAddresses)

@@ -39,7 +39,9 @@ class ClipboardSync;
 class Discovery;
 class FileReceiver;
 class FileSender;
+class GlobalHotkey;
 class H264Decoder;
+class PrivacyCurtain;
 class RemoteView;
 class ScreenOverlayBar;
 class ScreenStreamer;
@@ -77,6 +79,22 @@ public:
     // 停止监听（断开全部控制端但保留窗口，可再次开始监听）。
     void stopHost();
     bool isHosting() const;
+
+    // ---- 急停 / 隐私遮挡 ----
+    //
+    // 急停 = 立刻停止监听并断开全部控制端。这是**全局热键**的程序化入口。
+    // ⚠️ 绑的是 `stopHost()` 而不是「踢掉所有控制端」—— 后者「踢了还能再进」，
+    // 叫急停名不副实（`stop()` 之后对方连 TCP 都连不上）。
+    void emergencyStop();
+
+    // 遮挡 = 本机黑窗 + 停发帧 + 收回操作权，再调一次恢复。热键与菜单共用。
+    void togglePrivacyCurtain();
+    bool privacyCurtainShown() const { return curtainOn_; }
+
+    // 两个热键的组合文本。**只在这一处定义** —— 菜单提示、状态提示、黑窗上的
+    // 逃生提示与文档都从这里取，改键才不会漏掉某一处。
+    static QString privacyHotkeyText() { return QStringLiteral("Ctrl+Alt+F11"); }
+    static QString panicHotkeyText()   { return QStringLiteral("Ctrl+Alt+F12"); }
 
     // 本机键鼠是否已被机主锁定（读工作线程推来的快照，GUI 侧随时可查）。
     bool inputLocked() const { return hostState_.inputLocked; }
@@ -274,9 +292,9 @@ private:
     // 「这一格能不能拿来连下一台」——为空（还没连过）或那条连接已经死了才算能。
     // 活着 / 正在重连待命的那一格不复用（那属于「再开一格」的情形）。
     static bool viewIsReusable(const lanrdp::RemoteView *view);
-    void buildHostMenu();            // 【被控】菜单（开始/停止监听 + 收回/恢复操作权）
+    void buildHostMenu();            // 【被控】菜单（监听开关 + 发送文件… + 收回/恢复操作权）
     void buildViewMenu();            // 悬浮条显隐的「视图」菜单入口
-    // 把【被控】菜单的两个双态项（监听开关、收回操作权）按当前状态刷新。
+    // 把【被控】菜单的两个双态项（监听开关、收回操作权）与「能不能发文件」刷新。
     void refreshHostMenu();
 
     // ---- 界面语言 ----
@@ -406,6 +424,9 @@ private:
     void sendFileFrom(lanrdp::RemoteView *view);
     // 【发送文件】右侧小三角里那项：不管剪贴板里有什么，直接弹选择框挑一个文件。
     void pickAndSendFile(lanrdp::RemoteView *view);
+    // 被控端的主动出口（【被控 → 发送文件…】）：弹选择框挑文件，发给正在操作本机的人。
+    // 被控端没有画面格、也没有悬浮条，这个菜单项是它唯一放得下手的入口。
+    void pickFilesToSendToHolder();
     // 把「剪贴板里有几个待发文件」刷到每一格的条上（图形换色 + 换提示）。
     void refreshClipboardFileButtons();
 
@@ -565,6 +586,15 @@ private:
     // 由 refreshClientList 逐格刷）。
     QAction    *listenAction_    = nullptr;   // 开始监听… / 停止监听
     QAction    *takeInputAction_ = nullptr;   // 收回操作权 / 恢复操作
+    QAction    *sendToHolderAction_ = nullptr;   // 被控端主动发文件（仅监听中可用）
+    QAction    *privacyAction_   = nullptr;   // 隐私遮挡 / 取消遮挡
+
+    // ---- 隐私遮挡 / 全局热键（2026-11-18）----
+    // `curtainOn_` 是 GUI 侧的唯一真相：只有热键与菜单这两个入口会改它，
+    // 宿主那一份是它的从属（`HostController::setPrivacyCurtain` 幂等）。
+    bool                    curtainOn_ = false;
+    lanrdp::PrivacyCurtain *curtain_   = nullptr;
+    lanrdp::GlobalHotkey   *hotkeys_   = nullptr;
 
     // ---- 菜单栏与「设好就不再改」的动作 ----
     // 语言切换要把这些文字整批重设，所以不能是 buildViewMenu() 里的局部变量。

@@ -114,6 +114,16 @@ public:
     void stop();
     bool isRunning() const;
 
+    // 暂停推流（隐私遮挡用）：**不抓帧、不发帧**，对端自然定格在最后一帧 ——
+    // `ScreenRenderer` 一旦有过帧就一直画最后一张，所以「定格」不需要任何协议配合。
+    //
+    // 恢复时强制重建编码器（⇒ 下一帧是 IDR）：不这么做控制端要花屏到下一个
+    // 自然关键帧，而遮挡解除的那一刻正是机主最希望「对方立刻看清」的时刻。
+    // 暂停期间连抓屏器都不碰（不是「抓了但不发」）—— 省 CPU 只是顺带，
+    // 主要是别让暂停的这段时间悄悄积累一堆没人要的帧。
+    void setPaused(bool paused);
+    bool isPaused() const { return paused_; }
+
     quint64 framesSent() const { return framesSent_; }
     quint64 bytesSent() const { return bytesSent_; }
     void    resetStats();
@@ -185,6 +195,10 @@ private:
     bool                         forceKeyframe_  = true;
     bool                         h264Warned_     = false;
     QString                      codecNote_;      // 编码器能力受限说明（见 codecNote()）
+
+    // 暂停位（隐私遮挡）。**跨 start/stop 保持** —— 用户是在遮挡状态下
+    // 停掉监听又再开的，推流不该悄悄恢复（见 HostController::start 里的重锁）。
+    bool paused_ = false;
 
     // 自适应码率状态
     std::function<qint64()> pendingSource_;         // 积压来源（空 = 读真实 targets）

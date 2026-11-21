@@ -18,9 +18,13 @@ external services, no installer.
 - **Input token**: only one viewer can drive mouse and keyboard at a time — request it, yield it,
   or have the host revoke it
 - **H.264 compression** (Media Foundation), or turn it off and send raw frames
-- **File transfer**: drag a file onto the view; or copy files elsewhere and click **Send file** on
-  that cell's floating bar (**copying alone sends nothing** — up to 64 files per send). The receiver
-  picks the destination folder; 4 GiB per file
+- **File transfer in both directions** (the receiver picks the folder; 4 GiB per file):
+  - Viewer → host: drag a file onto the view; or copy files elsewhere and click **Send file** on
+    that cell's floating bar (**copying alone sends nothing** — up to 64 files per send). The small
+    arrow on the right of the button is **Choose file…**
+  - Host → viewer: copy files inside the remote view (Ctrl+C) and paste them on your own machine
+    (Ctrl+V); or use **Host → Send file…** to pick files yourself and send them to whoever is
+    currently driving this machine (unavailable while nobody is)
 - **Two-way clipboard sync**: text and files; images and HTML are not synced
 - **LAN auto-discovery**: *New Connection* lists machines currently waiting for viewers — click a
   row to fill in address and port (a machine with two network cables shows one row per address;
@@ -28,6 +32,12 @@ external services, no installer.
   nothing
 - **Audio**: the viewer can hear the host's system sound (downlink only; can be turned off under
   *Settings…*)
+- **Privacy curtain** (`Ctrl+Alt+F11`, works even while another program has focus): every screen on
+  this machine turns black at once, and frame delivery, audio and input rights all stop — the viewer
+  sees a frozen picture, cannot click, and hears nothing. Press again to restore, and the picture
+  comes back sharp immediately. Also available as **Host → Privacy curtain**
+- **Panic stop** (`Ctrl+Alt+F12`, works even while another program has focus): stop listening and
+  drop every connected viewer in one keystroke — nobody can connect again until you start listening
 - **Automatic reconnect** with backoff (on by default), plus heartbeat-based dead-peer detection
 - **Adaptive bitrate**: adjusts to network conditions; the cap is selectable in
   *Start Listening…* (4 / 8 / 12 / 16 Mbps, default 8)
@@ -63,7 +73,11 @@ the steps below.
    *Settings…* (off by default). One switch does both jobs: register the auto-start entry and begin
    listening with the last port and password. Without a saved password it will not auto-start, and
    the status bar says so
-5. Windows Firewall prompts on the first listen — choose **Allow this program through**.
+5. Don't want the screen seen? Press `Ctrl+Alt+F11` for the privacy curtain — every screen goes
+   black, the viewer's picture freezes, audio stops and input rights are taken back. Press it again
+   to restore. To kick everyone out at once press `Ctrl+Alt+F12` (stops listening; nobody can
+   reconnect until you start it again)
+6. Windows Firewall prompts on the first listen — choose **Allow this program through**.
    **If you skip it, Windows will not ask again** and other machines will never be able to connect.
    To fix it afterwards, create a rule under *Windows Defender Firewall with Advanced Security →
    Inbound Rules*: either **Program** pointing at `lanrdp.exe`, or **Port** with the port you used
@@ -80,7 +94,8 @@ the steps below.
    floating bar
 4. Copied files elsewhere with Ctrl+C? **Send file** on that cell's floating bar lights up — click
    it to actually send. For any other file, use the small arrow on the right of the button →
-   **Choose file…**
+   **Choose file…**. The other direction works too: copy files inside the remote view (Ctrl+C) and
+   paste them on your own machine (Ctrl+V)
 5. If the host has two or more displays, a **Screen** button appears on the floating bar — use it
    to choose which one to view (only one is streamed at a time; single-monitor hosts never show
    this button)
@@ -92,6 +107,10 @@ the steps below.
 - **Auto-discovery needs its own UDP rule**: the peer list relies on UDP broadcast (port `9001`),
   and firewalls allow protocols separately — with only TCP allowed the list simply stays empty.
   Typing the address by hand still works, so an empty list is not a failure
+- **Only LAN peers are accepted**: the host accepts connections from addresses inside its own subnets
+  (plus loopback). Anything from another subnet or over a VPN is dropped immediately and nothing is
+  logged server-side. That is deliberate, not a fault — to go across subnets, both ends have to look
+  like they share one
 - **Both ends must run the same build.** A protocol mismatch shows up as a refused connection or a
   picture that never arrives
 - **With "minimize to tray" enabled, closing the window does not quit**: the window

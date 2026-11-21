@@ -23,6 +23,7 @@ namespace lanrdp {
 class AudioCapturer;
 class AudioStreamer;
 class FileReceiver;
+class FileSendQueue;
 class HostServer;
 class LogPort;
 class ScreenStreamer;
@@ -117,6 +118,19 @@ public:
     // UI 不能自己做这件事 —— 它手里既没有可靠的持有者指针，也不能碰工作线程的 socket。
     void sendClipboardFrame(const Frame &frame);
 
+    // 反向发文件：把机主剪贴板里的这批文件发给**正在操作本机**的那一端。
+    // 门 = 有人持令牌；没人在操作时返回 false 并记一行日志 —— 把机主的剪贴板
+    // 推给一个「只看着屏幕」的人，等于绕过「谁在操作」这条线。
+    // 返回 false 只表示「一个都发不出去」，随后仍可能有文件在传（串行队列）。
+    bool sendClipboardFilesToHolder(const QStringList &paths);
+
+    // 机主自己挑的文件（【被控 → 发送文件…】）：同一个收件人、同一道门，
+    // 区别只在**不发剪贴板清单** —— 那批是「要凑齐写对方剪贴板」的，这几个不是。
+    bool sendFilesToHolder(const QStringList &paths);
+
+    // 现在有没有人持令牌（= 有没有能接收剪贴板文件的那一端）。纯读，给 UI 判按钮用。
+    bool hasInputHolder() const { return holderSession() != nullptr; }
+
     QVector<ClientInfo> clients() const;
     int  clientCount() const;
     void dropClient(quint64 sessionId);
@@ -127,6 +141,19 @@ public:
     Session *holderSession() const;
     void     takeInput();    // 三段式 lock -> release -> 通知对端（顺序不能反）
     void     unlockInput();
+
+    // ---- 隐私遮挡 ----
+    //
+    // 一键：本机那一层黑窗由 UI 盖（`app/PrivacyCurtain`），**这里**负责另外两件 ——
+    // 缺一件就是半成品：
+    // · 停发帧 ⇒ 控制端定格在最后一帧（`ScreenRenderer` 有过帧就一直画最后一张，
+    //   所以不需要任何协议配合）
+    // · 收回并锁定操作权 ⇒ 黑着屏还被注入，是机主最看不见自己在被做什么的状态
+    //
+    // 幂等。进入时若本来就锁着，退出时**不会替机主解锁**（记在 curtainLockedInput_）。
+    // 遮挡状态**跨 stop()/start() 保持**：停监听不会清掉推流的暂停位，重新监听时补一次锁。
+    void setPrivacyCurtain(bool on);
+    bool privacyCurtain() const { return curtainOn_; }
 
     // ---- 统计与诊断（状态栏 / 日志口径）----
     quint64 framesSent() const;
@@ -171,6 +198,12 @@ signals:
     void fileProgress(quint64 received, quint64 total);
     void fileReceived(bool ok, const QString &path, const QString &message);
 
+    // **发送**文件（被控端 → 控制端，剪贴板文件反向）。与上面三条分开的信号：
+    // 一个窗口能同时是「被控端在收」和「被控端在发」，共用一套就会把两条进度混在一起。
+    void fileSendStarted(const QString &name, quint64 total);
+    void fileSendProgress(quint64 sent, quint64 total);
+    void fileSendFinished(bool ok, const QString &path, const QString &message);
+
     void inputInjected(int kind);  // 成功注入一次（状态栏计数用）
     void captureFailed(const QString &error);
 
@@ -209,6 +242,10 @@ private:
     void    notifyUi();
     void applyCodec();
     void ensureFileReceiver();
+    // 被控端 → 控制端的发送队列：按需建、换人就换绑。
+    // `what` 只用于日志措辞（「剪贴板里的」/「要发的」）与「要不要先发清单」。
+    bool startSendToHolder(const QStringList &paths, bool clipboardBatch, const QString &what);
+    void abortSenderToHolder();
     // 幂等：在当前线程里建音频扇出 + 采集线程（只从 start() 调）。
     // 采集起来了不等于在跑 —— 由「有目标接入」驱动（见 handleAuthenticated）。
     void ensureAudio();
@@ -230,6 +267,14 @@ private:
     HostServer     *host_         = nullptr;
     ScreenStreamer *streamer_     = nullptr;
     FileReceiver   *fileReceiver_ = nullptr;
+    // 反向发文件（被控端 → 正在操作本机的那一端）。只在有人持令牌时才用得上；
+    // 剪贴板那批与机主手挑的都走这一个队列（一次只能传一份，混两个队列会撞）。
+    FileSendQueue  *senderToHolder_ = nullptr;
+
+    // 隐私遮挡状态（见 setPrivacyCurtain）。`curtainLockedInput_` 只表达
+    // 「这一次的锁是我加的」—— 机主自己锁的那种，退出遮挡时不能被我解开。
+    bool curtainOn_          = false;
+    bool curtainLockedInput_ = false;
 
     // 音频：扇出（宿主线程）+ 采集线程（自己的线程）。
     // 采集线程是 QThread 子类，随本对象析构 —— 析构里会 `stopAndWait()`。

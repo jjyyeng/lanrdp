@@ -20,7 +20,8 @@ namespace lanrdp {
 
 class AuthClient;
 class DecoderWorker;
-class FileSender;
+class FileReceiver;
+class FileSendQueue;
 class Session;
 
 // 一条**控制端**连接的全部状态与生命周期。
@@ -97,7 +98,12 @@ public:
     // **下一次**文件传输会用的 id。取值从随机数起步、每次递增 —— 它只保证
     // 「同一连接内不重复」，不保证全局唯一（接收侧已按来源隔离，不再依赖这点）。
     // 暴露出来是为了让「下一笔是几号」可被日志与测试观察到。
-    quint32 nextTransferId() const { return nextTransferId_; }
+    quint32 nextTransferId() const;
+
+    // ---- 接收文件（被控端 → 控制端）----
+    // 落到哪个目录。默认「下载」目录；上层可在连接前改（测试用临时目录）。
+    void setReceiveDir(const QString &dir);
+    QString receiveDir() const;
 
     // 发送一次输入事件。未持令牌时**用这次操作去申请一次令牌**（幂等，见 requestToken）。
     // force=true 时忽略全局键鼠开关（命令行自测用）。
@@ -228,14 +234,21 @@ signals:
     void fileProgress(quint64 sent, quint64 total);
     void fileFinished(bool ok, const QString &path, const QString &message);
 
+    // 文件**接收**（被控端往本端发）。⚠️ 与上面三条**不能合用**：同一个窗口
+    // 既能发也能收，合用一套信号会把两条进度打进同一条进度条。
+    // 上层用它做两件事：状态栏提示，以及把成功的路径交给剪贴板同步器凑批。
+    void fileReceiveStarted(const QString &fileName, quint64 totalSize);
+    void fileReceiveProgress(quint64 received, quint64 total);
+    void fileReceived(bool ok, const QString &path, const QString &message);
+
 private slots:
     void onHeartbeatTick();
     void onReconnectTimeout();
 
 private:
     void handleFrame(const Frame &frame);  // 收帧总入口（心跳 / 令牌 / 剪贴板 / 画面）
-    void ensureFileSender();
-    void pumpFileQueue();
+    void bindFileQueue();                  // 把发送队列绑到当前会话
+    void ensureFileReceiver();             // 惰性建接收器（落盘目录固定取自 receiveDir_）
     void scheduleReconnect();
     void onSocketDisconnected();
 
@@ -245,7 +258,12 @@ private:
     // 之前是 `H264Decoder *decoder_` 直接用 —— 4 路 4K 时把 UI 线程打到 125–155%，
     // 多视窗根本落不了地。惰性创建：首次收到 H.264 时按码流尺寸起一个 worker。
     DecoderWorker *decoder_   = nullptr;
-    FileSender   *fileSender_ = nullptr;
+    // 发送侧的「排队 + 整批放弃」全在这个类里（两个方向共用一份实现）。
+    FileSendQueue *fileQueue_ = nullptr;
+    // 接收侧：被控端也能往本端发文件（剪贴板文件反向）。同一个类被两端复用，
+    // 所以同名、覆盖加后缀、上限这些规则天然一致。
+    FileReceiver  *fileReceiver_ = nullptr;
+    QString        receiveDir_;
 
     QTimer *heartbeatTimer_ = nullptr;  // 3 s：发心跳 + 判死
     QTimer *reconnectTimer_ = nullptr;  // singleShot：退避重连
@@ -291,11 +309,6 @@ private:
     // 把「最近一次投递的 H.264 帧载荷字节数」记在这里供回调统计用
     // （口径 = 每产出一张图就加一次该帧 payload 字节）。
     qint64 pendingFrameBytes_ = 0;
-
-    std::uint32_t nextTransferId_ = 1;
-
-    // 等着的文件（本地绝对路径）。队首是**正在传**的那一个之下的第一个。
-    QStringList   fileQueue_;
 };
 
 } // namespace lanrdp

@@ -16,6 +16,8 @@
 
 #include "app/AutoStart.h"
 #include "app/Dialogs.h"
+#include "app/GlobalHotkey.h"
+#include "app/PrivacyCurtain.h"
 #include "ui/Glyph.h"
 #include "app/SingleInstance.h"
 #include "app/TaskbarBadge.h"
@@ -73,6 +75,13 @@ using namespace lanrdp;
 
 namespace {
 constexpr quint16 kDefaultPort = 9000;
+
+// 两条全局热键的 id。`RegisterHotKey` 的 id 空间是**本进程**的，随便取；
+// 但必须稳定 —— 换一个值等于换一条注册，而 id 只在这里和收消息处出现。
+enum HotkeyId {
+    kHotkeyPrivacyCurtain = 1,   // Ctrl+Alt+F11
+    kHotkeyPanicStop      = 2,   // Ctrl+Alt+F12
+};
 
 // 控制端心跳（3 s）/ 死链判定（10 s）/ 重连退避上限（30 s）
 // 这三条常量已随心跳与重连逻辑一起移入 net/ClientConnection.cpp（它们只服务那条连接）。
@@ -359,6 +368,39 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
                 emit fileReceived(ok, path, message);
             });
 
+    // ---- 反向发文件（被控端 → 控制端）：信号与「接收」分开，别共用一条进度条 ----
+    connect(host_, &lanrdp::HostController::fileSendStarted, this,
+            [this](const QString &name, quint64 total) {
+                log(QStringLiteral("开始发送文件：%1（%2）").arg(name, humanBytes(total)));
+                setStatusText(tr("发送中：%1").arg(name));
+                beginProgress(sendProgress_, tr("发送中"), name, total);
+            });
+    connect(host_, &lanrdp::HostController::fileSendProgress, this,
+            [this](quint64 sent, quint64 total) {
+                if (total == 0)
+                    return;
+                stepProgress(sendProgress_, sent, total);
+                setStatusText(tr("发送中 %1 / %2 (%3%)")
+                                  .arg(humanBytes(sent))
+                                  .arg(humanBytes(total))
+                                  .arg(int(sent * 100 / total)));
+            });
+    connect(host_, &lanrdp::HostController::fileSendFinished, this,
+            [this](bool ok, const QString &path, const QString &message) {
+                endProgress(sendProgress_);
+                if (ok) {
+                    log(QStringLiteral("文件已发送并校验通过：%1").arg(path));
+                    setStatusText(tr("文件已发给对方：%1").arg(QFileInfo(path).fileName()));
+                    // 发完才算「这批处理过了」，否则同一批会一直挂在待发状态
+                    //（被控端没有那颗按钮，留着也没处点）。
+                    if (clipboardSync_)
+                        clipboardSync_->discardPendingLocalFiles();
+                } else {
+                    log(QStringLiteral("发送文件失败：%1").arg(message));
+                    setStatusText(tr("发送文件失败"));
+                }
+            });
+
     connect(host_, &lanrdp::HostController::inputInjected, this, &MainWindow::inputInjected);
     connect(host_, &lanrdp::HostController::captureFailed, this, &MainWindow::captureFailed);
 
@@ -380,6 +422,26 @@ MainWindow::MainWindow(const QString &logFilePath, const QString &sessionFilePat
     // 接线齐了才让宿主线程跑起来 —— 否则第一批信号可能落到还没接好的槽上。
     // 宿主内部的定时器/套接字都由 `start()` 在工作线程里创建（见 HostController::ensureTimers）。
     hostThread_->start();
+
+    // ---- 全局热键：遮挡（Ctrl+Alt+F11）+ 急停（Ctrl+Alt+F12）----
+    // 热键是主路径，菜单项只管「能不能被发现」。注册失败**只记一行日志并指路菜单**：
+    // 组合被占用是常态（输入法 / 截图工具 / 显卡驱动都在抢 Ctrl+Alt+X），
+    // 抢不到不该让这个功能不可用，也不该弹窗打断——菜单项一直都在。
+    hotkeys_ = new lanrdp::GlobalHotkey(this);
+    connect(hotkeys_, &lanrdp::GlobalHotkey::activated, this, [this](int id) {
+        if (id == kHotkeyPrivacyCurtain)
+            togglePrivacyCurtain();
+        else if (id == kHotkeyPanicStop)
+            emergencyStop();
+    });
+    connect(hotkeys_, &lanrdp::GlobalHotkey::bindFailed, this,
+            [this](int id, const QString &sequence, const QString &reason) {
+                Q_UNUSED(id);
+                log(QStringLiteral("全局热键 %1 没能注册（%2）；请改用【被控】菜单里的对应项")
+                        .arg(sequence, reason));
+            });
+    hotkeys_->bind(kHotkeyPrivacyCurtain, privacyHotkeyText());
+    hotkeys_->bind(kHotkeyPanicStop, panicHotkeyText());
 
     log(QStringLiteral("日志文件：%1").arg(logPort_->logFilePath()));
     if (!logPort_->fileWritable()) {
@@ -482,6 +544,11 @@ MainWindow::~MainWindow()
         if (v && v->connection())
             v->connection()->teardown();
     }
+
+    // 黑窗没有父对象（主窗收进托盘时它也得留着），所以必须在这里收掉。
+    // 热键不用管：`~GlobalHotkey` 会把注册撤干净。
+    delete curtain_;
+    curtain_ = nullptr;
 }
 
 void MainWindow::buildUi()
@@ -947,10 +1014,29 @@ void MainWindow::buildHostMenu()
     // —— 先把键鼠锁住，之后谁连上来都操作不了（stopHost 会清锁）。
     connect(takeInputAction_, &QAction::triggered, this, &MainWindow::onTakeInputButtonClicked);
 
+    // 被控端唯一能放文件入口的地方：它没有画面格、也没有悬浮条。
+    // 排在两个双态项之后 —— 上面两项是「监听开着没有 / 谁在操作」，这一项是「真要做事了」。
+    sendToHolderAction_ = hostMenu_->addAction(tr("发送文件…"));
+    sendToHolderAction_->setObjectName(QStringLiteral("actionSendFileToHolder"));
+    sendToHolderAction_->setStatusTip(tr(
+        "把文件发给正在操作本机的对方；文件保存到对方的接收目录，完成后自动校验完整性"));
+    connect(sendToHolderAction_, &QAction::triggered, this,
+            &MainWindow::pickFilesToSendToHolder);
+
+    // 隐私遮挡。⛔ 不进【设置…】：这是「按一下就生效」的动作，不是偏好
+    //（守住「别再加第六个开关」）。排在最后 —— 上面几项是「谁能操作 / 要发什么」，
+    // 这一项是「把这一切都挡住」，是菜单里最重的一下。
+    privacyAction_ = hostMenu_->addAction(tr("隐私遮挡"));
+    privacyAction_->setObjectName(QStringLiteral("actionPrivacyCurtain"));
+    privacyAction_->setStatusTip(
+        tr("立刻让本机屏幕变黑、定格对方画面并收回操作权；再点一次恢复（%1）")
+            .arg(privacyHotkeyText()));
+    connect(privacyAction_, &QAction::triggered, this, &MainWindow::togglePrivacyCurtain);
+
     refreshHostMenu();
 }
 
-// 把两个双态菜单项按当前状态刷新。由 updateConnectionUi 统一驱动
+// 把几个双态菜单项按当前状态刷新。由 updateConnectionUi 统一驱动
 //（监听起停 / 输入锁定 / 解锁的每一条路径都会走到那里）。
 void MainWindow::refreshHostMenu()
 {
@@ -962,12 +1048,29 @@ void MainWindow::refreshHostMenu()
 
     listenAction_->setText(hosting ? tr("停止监听")
                                    : tr("开始监听…"));
+    // 急停热键的**唯一**可发现处：它就是「停止监听」的快捷键，
+    // 所以提示挂在停止监听那一侧，而不是多摆一个看起来重复的菜单项。
     listenAction_->setStatusTip(hosting
-        ? tr("停止监听：断开所有已连接的控制端，本机不再接受新连接")
+        ? tr("停止监听：断开所有已连接的控制端，本机不再接受新连接（急停热键 %1）")
+              .arg(panicHotkeyText())
         : tr("本机开始等待连接：先确认端口和口令，再开始监听"));
 
     takeInputAction_->setText(locked ? tr("恢复操作")
                                      : tr("收回操作权"));
+
+    if (privacyAction_) {
+        privacyAction_->setText(curtainOn_ ? tr("取消遮挡")
+                                           : tr("隐私遮挡"));
+        privacyAction_->setStatusTip(
+            tr("立刻让本机屏幕变黑、定格对方画面并收回操作权；再点一次恢复（%1）")
+                .arg(privacyHotkeyText()));
+    }
+
+    // 没在监听时挑完文件也没地方发，先选后报错是纯浪费。
+    // ⚠️ **不按「有没有人在操作」去禁用**：那个状态每秒都在变，菜单项跟着一闪一闪
+    // 比「点下去在状态栏说明为什么发不出去」更让人困惑。
+    if (sendToHolderAction_)
+        sendToHolderAction_->setEnabled(hosting);
 }
 
 bool MainWindow::hostSessionActive() const
@@ -1343,6 +1446,18 @@ void MainWindow::retranslateUi()
     if (openSettingsAction_) {
         openSettingsAction_->setText(tr("设置…"));
         openSettingsAction_->setStatusTip(tr("连接、窗口与控制选项"));
+    }
+    if (sendToHolderAction_) {
+        sendToHolderAction_->setText(tr("发送文件…"));
+        sendToHolderAction_->setStatusTip(tr(
+            "把文件发给正在操作本机的对方；文件保存到对方的接收目录，完成后自动校验完整性"));
+    }
+    // 黑窗上的那两句也是 tr()：语言变了必须重画（它盖着整块屏幕，用户只会看到
+    // 一句旧语言的话，没有任何别的线索）。
+    if (curtain_) {
+        curtain_->setHotkeyText(privacyHotkeyText());
+        curtain_->setWindowTitle(tr("已遮挡"));
+        curtain_->update();
     }
 
     // 两个双态项的措辞随状态走，交给它按当前状态重写（别在这里再抄一份）。
@@ -1821,6 +1936,46 @@ void MainWindow::wireConnection(lanrdp::RemoteView *view)
             this, [this](const lanrdp::Frame &frame) {
                 if (clipboardSync_)
                     clipboardSync_->handleFrame(frame);
+            });
+
+    // ---- 文件接收（被控端 → 本端）：剪贴板文件反向 ----
+    // 进度条与「被控端收文件」共用同一条（全局只有一条），但信号是分开的，
+    // 免得把本端自己发出去的那条进度混进来。
+    connect(c, &lanrdp::ClientConnection::fileReceiveStarted,
+            this, [this](const QString &name, quint64 total) {
+                log(QStringLiteral("对方开始发来文件：%1（%2）").arg(name, humanBytes(total)));
+                beginProgress(recvProgress_, tr("接收中"), name, total);
+            });
+    // 进度按时间节流：对端每收满一个分片就报一次，几 G 的文件会报上十万次，
+    // 不节流的话状态栏与重绘会把 GUI 线程占满。
+    connect(c, &lanrdp::ClientConnection::fileReceiveProgress,
+            this, [this, lastTick = std::make_shared<QElapsedTimer>()](quint64 received,
+                                                                      quint64 total) {
+                if (total == 0)
+                    return;
+                if (received < total && lastTick->isValid() && lastTick->elapsed() < 200)
+                    return;
+                lastTick->restart();
+                stepProgress(recvProgress_, received, total);
+                setStatusText(tr("接收中 %1 / %2 (%3%)")
+                                  .arg(humanBytes(received))
+                                  .arg(humanBytes(total))
+                                  .arg(int(received * 100 / total)));
+            });
+    connect(c, &lanrdp::ClientConnection::fileReceived,
+            this, [this](bool ok, const QString &path, const QString &message) {
+                endProgress(recvProgress_);
+                if (ok) {
+                    log(QStringLiteral("对方发来的文件已接收并校验通过：%1").arg(path));
+                    setStatusText(tr("收到对方的文件：%1").arg(QFileInfo(path).fileName()));
+                } else {
+                    log(QStringLiteral("接收对方发来的文件失败：%1").arg(message));
+                    setStatusText(tr("接收文件失败"));
+                }
+                // 对方「复制文件」那一批的每个成员都从这里过：成功的攒起来，
+                // 凑齐了由剪贴板同步器一次写进本机剪贴板（失败即整批放弃）。
+                if (clipboardSync_)
+                    clipboardSync_->noteReceivedFile(ok ? path : QString());
             });
 
     connect(c, &lanrdp::ClientConnection::inputSent,
@@ -2658,6 +2813,32 @@ void MainWindow::pickAndSendFile(lanrdp::RemoteView *view)
         log(QStringLiteral("发送未启动（文件不可读，或连接已断开）"));
 }
 
+// 被控端主动发文件（【被控 → 发送文件…】）。
+//
+// 收件人只有一个可能：**正在操作本机的那一端**。被控端没有「发给谁」的选择 ——
+// 它连画面格都没有，多控制端时也分不出用户想给谁；推给正在操作的那个人是唯一
+// 不需要再解释的口径（与剪贴板那批同一道门）。
+//
+// 与「剪贴板那批」的差别只在发送侧：这批**不带** `CLIPBOARD_FILES` 清单，
+// 落在对方的接收目录里就完了，不动对方的剪贴板。
+void MainWindow::pickFilesToSendToHolder()
+{
+    if (!isHosting()) {
+        log(QStringLiteral("还没开始监听，没有可以接收文件的对象"));
+        setStatusText(tr("先开始监听，再发文件"));
+        return;
+    }
+
+    const QStringList paths = QFileDialog::getOpenFileNames(this, tr("选择要发送的文件"));
+    if (paths.isEmpty())
+        return;
+
+    // 成功与否由宿主那一侧回报（`fileSend*` 信号统一刷状态栏）：
+    // 这里不抢先写「正在发送」，否则「没有控制端在操作本机」会被它盖掉。
+    log(QStringLiteral("准备把 %1 个文件发给正在操作本机的人").arg(paths.size()));
+    postToHost([paths](lanrdp::HostController *h) { h->sendFilesToHolder(paths); });
+}
+
 void MainWindow::startHost(quint16 port, const QString &password)
 {
     // 记住参数，供下次打开【开始监听…】对话框时回填。
@@ -2720,6 +2901,55 @@ bool MainWindow::isHosting() const
 {
     // 读**本地快照**：宿主是否在监听，只有快照说了算（跨线程读成员是不安全的）。
     return hostState_.listening;
+}
+
+// 急停：一键把「有人在看」这件事彻底掐掉。
+//
+// 为什么是 `stopHost()` 而不是「踢掉所有控制端」：后者踢完对方还能立刻再连进来，
+// 叫「急停」名不副实 —— 真正着急的人下一步本来就要停监听，不如一步到位。
+void MainWindow::emergencyStop()
+{
+    if (!hostState_.listening) {
+        log(QStringLiteral("急停：当前没有在监听，无需断开"));
+        setStatusText(tr("当前没有在监听"));
+        return;
+    }
+
+    stopHost();
+    log(QStringLiteral("急停：已停止监听并断开全部控制端"));
+    setStatusText(tr("已急停：本机不再接受连接"));
+}
+
+// 隐私遮挡：本机黑窗 + 停发帧 + 收回操作权，三件事一起做，再按一次恢复。
+//
+// 三件的归属不在一处，这是刻意的：
+// · 黑窗是**本机**的事（GUI 线程，`PrivacyCurtain`）
+// · 停发帧与锁令牌是**宿主**的事（推流器与令牌门都只归工作线程）
+// GUI 只保留 `curtainOn_` 这一个开关，宿主那一份是它的从属（`setPrivacyCurtain` 幂等）。
+void MainWindow::togglePrivacyCurtain()
+{
+    const bool on = !curtainOn_;
+
+    if (on) {
+        if (!curtain_) {
+            // 无父对象：主窗被收进托盘 / 最小化时，这一层必须照样盖着。
+            curtain_ = new lanrdp::PrivacyCurtain();
+            connect(curtain_, &lanrdp::PrivacyCurtain::dismissed, this, [this]() {
+                if (curtainOn_)
+                    togglePrivacyCurtain();
+            });
+        }
+        curtain_->setHotkeyText(privacyHotkeyText());
+        curtain_->showOverVirtualDesktop();
+    } else if (curtain_) {
+        curtain_->hide();
+    }
+
+    curtainOn_ = on;
+
+    postToHost([on](lanrdp::HostController *h) { h->setPrivacyCurtain(on); });
+
+    refreshHostMenu();
 }
 
 // 对端断开 / 被踢 / 主动断开：复位界面。
@@ -2846,13 +3076,33 @@ void MainWindow::setupClipboard()
                 refreshClipboardFileButtons();
                 if (paths.isEmpty())
                     return;
-                // 只有「连出去的那一端」才谈得上发送；被控端复制文件与本功能无关，
-                // 不该因此刷日志。
-                if (!clientReady())
+
+                // 控制端优先（与剪贴板文本选目标同一口径）：连出去的那一端才是
+                // 发送目标。复制文件不会自动发，只点亮条上那颗按钮。
+                if (clientReady()) {
+                    log(QStringLiteral("剪贴板里有 %1 个文件，点悬浮条上的【发送文件】发给对方")
+                            .arg(paths.size()));
+                    setStatusText(tr("剪贴板里有 %1 个文件，可以发给对方").arg(paths.size()));
                     return;
-                log(QStringLiteral("剪贴板里有 %1 个文件，点悬浮条上的【发送文件】发给对方")
+                }
+
+                // 被控端：机主在自己桌面上复制了文件，而此刻正有人操作本机 ——
+                // 那个持操作权的人就是刚按下 Ctrl+C 的人，直接发给他，不必再点按钮
+                //（被控端没有画面格，本来也没有那颗按钮）。
+                // 没人在操作就**什么都不做**：本机自己复制个文件不该有任何反应。
+                bool holderOnline = false;
+                for (const auto &info : std::as_const(hostState_.clients))
+                    holderOnline = holderOnline || info.isHolder;
+                if (!holderOnline)
+                    return;
+
+                log(QStringLiteral("剪贴板里的 %1 个文件开始发往正在操作本机的控制端")
                         .arg(paths.size()));
-                setStatusText(tr("剪贴板里有 %1 个文件，可以发给对方").arg(paths.size()));
+                setStatusText(tr("正在把 %1 个文件发给对方").arg(paths.size()));
+                // 队列绑在宿主线程的 socket 上，不能从 GUI 线程直接发。
+                postToHost([paths](lanrdp::HostController *h) {
+                    h->sendClipboardFilesToHolder(paths);
+                });
             });
     connect(clipboardSync_, &lanrdp::ClipboardSync::filesIncoming, this,
             [this](const QStringList &names) {

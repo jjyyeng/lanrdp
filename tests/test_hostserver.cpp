@@ -43,6 +43,10 @@ private slots:
     // 未认证连接的两道门：瞬时上限 + 握手超时
     void unauthenticatedConnectionsAreCapped();
     void handshakeTimeoutDropsSilentConnection();
+
+    // 入站来源过滤：0.0.0.0 会把 VPN / 热点上的对端一并受理
+    void peerOutsideLanIsDropped();
+    void defaultPolicyStillAcceptsLoopback();
 };
 
 namespace {
@@ -247,8 +251,13 @@ void TestHostServer::heartbeatDefaultsMatchSpec()
 void TestHostServer::heartbeatDropsSilentClientButKeepsResponsive()
 {
     lanrdp::HostServer host(QStringLiteral("pw"));
-    host.setHeartbeatIntervalMs(50);    // 测试里把 3 s / 10 s 压成 50 ms / 150 ms
-    host.setDeadTimeoutMs(150);
+    // 压到 100 ms / 800 ms（真机是 3 s / 10 s），但**不能更小**：
+    // 两个客户端的握手是异步的，第二个（会回心跳的那个）从 connect 到入池要花掉
+    // 若干毫秒 —— 死链窗口若只有 150 ms，机器一忙（例如全量套件连跑），
+    // 哑客户端会在第二个入池之前就被判死，`sessions().size()` 永远等不到 2。
+    // 2026-11-17 实测过：单独跑 3/3 通过，全量跑时偶发 1 failed。
+    host.setHeartbeatIntervalMs(100);
+    host.setDeadTimeoutMs(800);
     QVERIFY(host.listen(0));
 
     // 哑客户端：握手完就不再发任何东西（但 socket 还开着）
@@ -271,7 +280,7 @@ void TestHostServer::heartbeatDropsSilentClientButKeepsResponsive()
     QObject::connect(&host, &lanrdp::HostServer::clientDisconnected,
                      [&serverDisconnects]() { ++serverDisconnects; });
 
-    // ① 哑客户端被清出（阈值 150 ms，给足余量）
+    // ① 哑客户端被清出（阈值 800 ms，给足余量）
     QTRY_VERIFY_WITH_TIMEOUT(host.sessions().size() == 1, 3000);
     QCOMPARE(serverDisconnects, 1);
     QVERIFY2(host.sessions().contains(serverSessionFor(host, live.sock)),
@@ -687,6 +696,58 @@ void TestHostServer::listenFailureReportsPortInUse()
     QVERIFY2(reason.contains(QStringLiteral("占用")), qPrintable(reason));
     QVERIFY2(reason.contains(QStringLiteral("换")) || reason.contains(QStringLiteral("关掉")),
              qPrintable(reason));
+}
+
+// 来源不在本机任何子网内（VPN / 手机热点 / 别的网段）：accept 之后立刻掐掉。
+//
+// 三条不能破的约束：① 连 Session 都不建；② 不报成「认证被拒」；③ 不计进退避 ——
+// 否则端口扫描会把退避表污染成「一堆人在猜口令」。
+void TestHostServer::peerOutsideLanIsDropped()
+{
+    lanrdp::HostServer host(QStringLiteral("pw"));
+    // 注入了「全拒」：真实环境下造不出「不在本机子网的对端」，只能这样走到拒绝分支。
+    host.setPeerFilter([](const QHostAddress &) { return false; });
+    QVERIFY(host.listen(0));
+
+    QSignalSpy outside(&host, &lanrdp::HostServer::peerOutsideLan);
+    int            rejected  = 0;
+    int            throttled = 0;
+    QObject::connect(&host, &lanrdp::HostServer::clientRejected,
+                     [&rejected]() { ++rejected; });
+    QObject::connect(&host, &lanrdp::HostServer::connectionThrottled,
+                     [&throttled](const QString &, qint64) { ++throttled; });
+
+    QTcpSocket client;
+    client.connectToHost(QHostAddress::LocalHost, host.port());
+    client.waitForConnected(2000);   // 被立刻掐掉时可能是 false，两种都接受
+
+    QTRY_COMPARE(client.state(), QAbstractSocket::UnconnectedState);
+    QCOMPARE(outside.count(), 1);
+    // 双栈监听下对端常报 `::ffff:127.0.0.1`，报给用户的必须是归一化后的形式。
+    QCOMPARE(outside.first().at(0).toString(), QStringLiteral("127.0.0.1"));
+    QCOMPARE(rejected, 0);
+    QCOMPARE(throttled, 0);
+    QCOMPARE(host.pendingAuthCount(), 0);
+    QCOMPARE(host.sessions().size(), 0);
+}
+
+// 默认策略下 127.0.0.1 必须照旧连得上并握手成功。
+//
+// 这条守的是**过度拦截**那类故障：过滤装错了会把单机双开、本机自测（以及所有走
+// 回环的 ctest）一起挡死，症状是「突然谁也连不上」—— 比放行一条 VPN 连接更糟。
+void TestHostServer::defaultPolicyStillAcceptsLoopback()
+{
+    lanrdp::HostServer host(QStringLiteral("pw"));
+    QSignalSpy        outside(&host, &lanrdp::HostServer::peerOutsideLan);
+    QVERIFY(host.listen(0));
+
+    TestClient c = connectClient(host.port());
+    QVERIFY(c.sock);
+    QTRY_COMPARE(host.sessions().size(), 1);
+    QCOMPARE(outside.count(), 0);
+
+    delete c.auth;
+    delete c.session;
 }
 
 QTEST_GUILESS_MAIN(TestHostServer)

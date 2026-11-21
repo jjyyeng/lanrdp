@@ -2,7 +2,8 @@
 
 #include "common/ConnectionHints.h"
 #include "net/Auth.h"
-#include "net/FileSender.h"
+#include "net/FileReceiver.h"
+#include "net/FileSendQueue.h"
 #include "net/Session.h"
 #include "net/TcpRtt.h"
 #include "protocol/Clipboard.h"
@@ -11,10 +12,12 @@
 #include "viewer/DecoderWorker.h"
 
 #include <QDateTime>
+#include <QDir>
 #include <QFileInfo>
 #include <QImage>
 #include <QNetworkProxy>
 #include <QRandomGenerator>
+#include <QStandardPaths>
 #include <QTcpSocket>
 #include <QTimer>
 #include <QVector>
@@ -40,10 +43,16 @@ constexpr int kMaxDecoderOpenFailures = 3;
 ClientConnection::ClientConnection(QObject *parent)
     : QObject(parent)
 {
-    // 传输 id 从随机值起步：它是协议里的唯一标识，固定从 1 开始的话
-    // 多条连接会撞在同一串 id 上，接收侧（按来源隔离后已无碍，但）
-    // 任何依赖「id 全局唯一」的推断都会失效。取值只要求同连接内不重复。
-    nextTransferId_ = QRandomGenerator::global()->generate();
+    // 发送队列：传输 id 的随机起点、串行排队、失败整批放弃都在它里面。
+    fileQueue_ = new FileSendQueue(this);
+    connect(fileQueue_, &FileSendQueue::started, this, &ClientConnection::fileStarted);
+    connect(fileQueue_, &FileSendQueue::progress, this, &ClientConnection::fileProgress);
+    connect(fileQueue_, &FileSendQueue::finished, this, &ClientConnection::fileFinished);
+    connect(fileQueue_, &FileSendQueue::logMessage, this, &ClientConnection::logMessage);
+
+    // 收到的文件默认落「下载」目录：对方推过来的东西不该散落在当前工作目录
+    //（从快捷方式启动时那是 exe 所在目录，往往不可写）。
+    receiveDir_ = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
 
     // 定时器**每连接一份**：控制端的判死与退避天然按连接记，连接数 ≤4 开销可忽略。
     heartbeatTimer_ = new QTimer(this);
@@ -68,11 +77,12 @@ ClientConnection::~ClientConnection()
     if (reconnectTimer_)
         reconnectTimer_->stop();
 
-    if (fileSender_) {
-        fileSender_->abort();
-        delete fileSender_;
-        fileSender_ = nullptr;
+    if (fileQueue_) {
+        fileQueue_->abort();
+        fileQueue_->setSession(nullptr);
     }
+    if (fileReceiver_)
+        fileReceiver_->abort();   // 半截文件不留：它会骗人
     if (decoder_) {
         // stop() 内部 quit()+wait()，保证解码线程**已经退出**才 delete。
         // 不能只 delete —— QThread 仍在跑时被析构会直接 abort 进程。
@@ -154,7 +164,7 @@ void ClientConnection::connectTo(const QString &host, quint16 port, const QStrin
         handshakeReported_ = true;
         ready_             = true;
         reconnectAttempt_  = 0;  // 连上了，退避计数清零
-        ensureFileSender();      // 建好发送器并绑到这条 session
+        bindFileQueue();         // 发送队列绑到这条 session 上
         emit logMessage(QStringLiteral("已连接到 %1:%2").arg(host).arg(port));
 
         // 连接成功后自动请求输入令牌（先连先得；抢不到点画面可重试）
@@ -250,13 +260,13 @@ void ClientConnection::teardown()
     hasScreenList_ = false;
     screenList_    = lanrdp::ScreenList();
 
-    // 发送器绑定在旧的 session 上，必须先中止并销毁
-    fileQueue_.clear();   // 换一台机器后，上一批没发完的文件不该继续发过去
-    if (fileSender_) {
-        fileSender_->abort();
-        delete fileSender_;
-        fileSender_ = nullptr;
+    // 发送器绑定在旧的 session 上，必须先中止并解绑
+    if (fileQueue_) {
+        fileQueue_->abort();          // 换一台机器后，上一批没发完的文件不该继续发过去
+        fileQueue_->setSession(nullptr);   // 解绑即销毁旧 FileSender
     }
+    if (fileReceiver_)
+        fileReceiver_->abort();       // 断连时正在收的那半截：丢掉，别留骗人的残file
     if (decoder_) {
         // 先停线程（quit + wait），再析构。wait() 不可省 ——
         // 解码线程里持有 MFT，且它的 COM 引用要在该线程内撤销。
@@ -401,29 +411,55 @@ void ClientConnection::sendInput(const InputEvent &event, bool force)
     emit inputSent(static_cast<int>(event.kind));
 }
 
-void ClientConnection::ensureFileSender()
+void ClientConnection::bindFileQueue()
 {
-    if (fileSender_ || !session_)
+    if (!fileQueue_)
         return;
+    fileQueue_->setSession(session_);   // 内部会把上一批没发完的清掉
+}
 
-    fileSender_ = new FileSender(session_, this);
-    connect(fileSender_, &FileSender::started, this,
-            [this](const QString &name, quint64 total) { emit fileStarted(name, total); });
-    connect(fileSender_, &FileSender::progress, this,
-            [this](quint64 sent, quint64 total) { emit fileProgress(sent, total); });
-    connect(fileSender_, &FileSender::finished, this,
+quint32 ClientConnection::nextTransferId() const
+{
+    return fileQueue_ ? fileQueue_->nextTransferId() : 0;
+}
+
+void ClientConnection::setReceiveDir(const QString &dir)
+{
+    if (dir.isEmpty())
+        return;
+    receiveDir_ = dir;
+    if (fileReceiver_)
+        fileReceiver_->setDownloadDir(receiveDir_);
+}
+
+QString ClientConnection::receiveDir() const
+{
+    return receiveDir_;
+}
+
+// 被控端往本端发文件时用。惰性建：只连不传的场景不必占着一个接收器。
+void ClientConnection::ensureFileReceiver()
+{
+    if (fileReceiver_) {
+        fileReceiver_->setDownloadDir(receiveDir_);
+        return;
+    }
+
+    fileReceiver_ = new FileReceiver(receiveDir_, this);
+
+    // ⚠️ 只转发，不在这里写剪贴板：`QClipboard` 只能在 GUI 线程碰，
+    // 而且「凑批」的状态在 ClipboardSync 里（上层负责把它接上）。
+    connect(fileReceiver_, &FileReceiver::started, this,
+            [this](FileReceiver::Source, const QString &name, quint64 total) {
+                emit fileReceiveStarted(name, total);
+            });
+    connect(fileReceiver_, &FileReceiver::progress, this,
+            [this](FileReceiver::Source, quint64 received, quint64 total) {
+                emit fileReceiveProgress(received, total);
+            });
+    connect(fileReceiver_, &FileReceiver::finished, this,
             [this](bool ok, const QString &path, const QString &message) {
-                emit fileFinished(ok, path, message);
-                if (ok) {
-                    pumpFileQueue();   // 上一份传完了，接着传队列里的下一份
-                    return;
-                }
-                // 一份失败就整批放弃：对端按清单等文件，缺一个就永远等不齐。
-                if (!fileQueue_.isEmpty()) {
-                    emit logMessage(QStringLiteral("已放弃队列中剩余的 %1 个文件")
-                                        .arg(fileQueue_.size()));
-                }
-                fileQueue_.clear();
+                emit fileReceived(ok, path, message);
             });
 }
 
@@ -456,13 +492,8 @@ bool ClientConnection::sendFiles(const QStringList &paths)
     if (!session_ || !ready_)
         return false;
 
-    ensureFileSender();
-    if (!fileSender_)
-        return false;
-
-    fileQueue_.append(paths);
-    pumpFileQueue();
-    return true;
+    bindFileQueue();
+    return fileQueue_->enqueue(paths);
 }
 
 bool ClientConnection::sendClipboardFiles(const QStringList &paths)
@@ -474,49 +505,12 @@ bool ClientConnection::sendClipboardFiles(const QStringList &paths)
         return false;
     }
 
-    if (paths.size() > kClipboardMaxFiles) {
-        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：一次最多 %1 个，这次有 %2 个")
-                            .arg(kClipboardMaxFiles)
-                            .arg(paths.size()));
-        return false;
-    }
+    bindFileQueue();
 
-    QStringList names;
-    names.reserve(paths.size());
-    for (const QString &path : paths)
-        names.append(QFileInfo(path).fileName());
-
-    const auto payload = encodeClipboardFiles(names);
-    if (!payload) {
-        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：这批文件名过长或为空"));
-        return false;
-    }
-
-    // 顺序要紧：清单先走（TCP 有序），对端先知道「要凑几个」，再收文件。
-    Frame manifest;
-    manifest.type    = static_cast<std::uint8_t>(FrameType::ClipboardFiles);
-    manifest.payload = *payload;
-    session_->sendFrame(manifest);
-
-    if (!sendFiles(paths)) {
-        emit logMessage(QStringLiteral("剪贴板里的文件没有发出去：本端文件通道不可用"));
-        return false;
-    }
-    return true;
-}
-
-void ClientConnection::pumpFileQueue()
-{
-    if (!fileSender_ || fileQueue_.isEmpty())
-        return;
-    if (fileSender_->busy())
-        return;   // 上一份还在传：它的 finished 会再叫一次
-
-    const QString next = fileQueue_.takeFirst();
-    if (!fileSender_->start(next, nextTransferId_++)) {
-        // start() 自己已经 conclude 过（会 emit fileFinished(false)），失败即整批放弃。
-        fileQueue_.clear();
-    }
+    // 清单一帧 + 逐个文件都在队列里发（「一份失败即整批放弃」的语义只在那一处）。
+    // ⚠️ 失败原因由队列自己写（超上限 / 名字非法 / 通道不可用各一句）——
+    // 这里再补一句「通道不可用」会把真正的原因顶掉。
+    return fileQueue_->enqueueClipboardBatch(paths);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +561,21 @@ void ClientConnection::handleFrame(const Frame &frame)
     if (type == static_cast<std::uint8_t>(FrameType::ClipboardText)
         || type == static_cast<std::uint8_t>(FrameType::ClipboardFiles)) {
         emit clipboardReceived(frame);
+        return;
+    }
+
+    // 文件（被控端 → 本端）：只有**本端持着操作权**时才收。
+    // 反向没有对称的 TokenGate 可用，`hasToken_` 就是同一道门 —— 只是看着
+    // 画面的人不该有办法往本机硬盘写文件。被控端只在有人持令牌时才发，
+    // 所以这两道门正常情况下同开同闭。
+    if (type == static_cast<std::uint8_t>(FrameType::FileHeader)
+        || type == static_cast<std::uint8_t>(FrameType::FileChunk)
+        || type == static_cast<std::uint8_t>(FrameType::FileEnd)) {
+        if (!hasToken_)
+            return;
+        ensureFileReceiver();
+        if (fileReceiver_)
+            fileReceiver_->onFrame(session_, frame);
         return;
     }
 

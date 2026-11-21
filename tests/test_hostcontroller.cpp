@@ -1,8 +1,12 @@
 #include <QtTest/QtTest>
 
 #include <QElapsedTimer>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
 
@@ -21,6 +25,7 @@
 #include "host/HostController.h"
 #include "host/ScreenCapturer.h"
 #include "net/Auth.h"
+#include "net/FileReceiver.h"
 #include "net/Session.h"
 #include "protocol/Frame.h"
 #include "protocol/InputEvent.h"
@@ -61,9 +66,14 @@ QSize desktopSize()
 #endif
 }
 
-// 锁屏 / 切换用户时，输入桌面不是 "Default" —— 此时 DXGI 采不到用户画面，
-// 测出来的延迟与代码无关。
-bool inputDesktopIsInteractable()
+// 当前会话能不能真的采到画面。
+//
+// 要判两件事，缺一都会假红：
+//   ① 锁屏 / 切到别的用户时输入桌面不是 "Default"，此时采到的是登录画面；
+//   ② 桌面**是**输入桌面也不等于采得到帧 —— 显示器休眠时 DXGI 的 DuplicateOutput
+//      直接 E_ACCESSDENIED，而 ① 完全看不出来。只判 ① 的后果是：机器闲置几分钟后
+//      依赖帧的用例开始假红（2026-11-17 20:06 实测，空闲 6 分钟即复现）。
+bool screenCaptureIsPossible()
 {
 #ifdef Q_OS_WIN
     HDESK desk = ::OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
@@ -75,10 +85,29 @@ bool inputDesktopIsInteractable()
     const BOOL ok =
         ::GetUserObjectInformationW(desk, UOI_NAME, name, sizeof(name), &needed);
     ::CloseDesktop(desk);
-    return ok && ::lstrcmpiW(name, L"Default") == 0;
-#else
-    return true;
+    if (!ok || ::lstrcmpiW(name, L"Default") != 0)
+        return false;
 #endif
+
+    // 真开一次抓屏：与 test_capture 用的是同一个判据，失败原因也就一致。
+    lanrdp::ScreenCapturer capturer;
+    QString                err;
+    return capturer.init(&err);
+}
+
+// 把 logLine 的 QSignalSpy 摊平成文本行，便于断言与打印。
+//
+// ⚠️ 不要用「lambda 捕获局部的 QStringList」代替 QSignalSpy：HostController
+// **析构时还会 emit 日志**，而捕获的容器声明在它之后 ⇒ 容器先被销毁，
+// 那条日志就追加进了已析构的对象。症状是随机位置的堆损坏、崩在下一个用例，
+// 排查极费劲（2026-11-18 用 PageHeap 抓到：~HostController → stop() → logLine）。
+QStringList logLines(const QSignalSpy &spy)
+{
+    QStringList out;
+    out.reserve(spy.size());
+    for (const QList<QVariant> &args : spy)
+        out.append(args.at(0).toString());
+    return out;
 }
 
 } // namespace
@@ -109,6 +138,17 @@ private slots:
     void receiveDirRoundTrips();
     void codecChoiceIsRemembered();
     void statsStartAtZero();
+
+    // 反向传文件（被控端 → 控制端）：必须有人持操作权才发，且要真落到对端
+    // 反向发文件（被控端 → 控制端）
+    void clipboardFilesGoToTheTokenHolder();
+    void pickedFilesGoToTheTokenHolder();
+
+    // 隐私遮挡：停流 + 收权；锁只在「这次是我加的」时才解开
+    void privacyCurtainLocksInputAndSurvivesRestart();
+    void privacyCurtainKeepsOwnersOwnLock();
+    void privacyCurtainAlsoSilencesAudio();
+    void privacyCurtainKeepsNewClientFromStartingAudio();
 
     // 线程亲和性的「单一决定点」：内部定时器只能在 start() 里建。
     void timersExistOnlyAfterStart();
@@ -514,8 +554,8 @@ void TestHostController::previewIsGatedOnHostSide()
     // 锁屏 / 切到别的用户时采不到用户画面，`sizes` 永远等不到 —— 这条用例的正向
     // 前提（「抓屏确实在跑」）根本不成立。跳过而不是判红：它与
     // `hostStaysResponsiveWhileStreaming` 是同一个环境约束。
-    if (!inputDesktopIsInteractable())
-        QSKIP("当前会话不可交互（锁屏 / 切换用户），采不到用户画面");
+    if (!screenCaptureIsPossible())
+        QSKIP("当前会话采不到画面（锁屏 / 切换用户 / 显示器休眠），跟抓屏有关的判据不成立");
 
     lanrdp::HostController hc;
     hc.setPreviewEnabled(false);
@@ -570,8 +610,8 @@ void TestHostController::startStopRepeatedlyDoesNotCrash()
 // 分辨率带来的常态，不是退化。环境不满足时跳过，但仍打印实测值。
 void TestHostController::hostStaysResponsiveWhileStreaming()
 {
-    if (!inputDesktopIsInteractable())
-        QSKIP("当前会话不可交互（锁屏 / 切换用户），采不到用户画面");
+    if (!screenCaptureIsPossible())
+        QSKIP("当前会话采不到画面（锁屏 / 切换用户 / 显示器休眠），跟抓屏有关的判据不成立");
 
     lanrdp::HostController hc;
     QVERIFY(hc.start(0, QStringLiteral("s3cret")));
@@ -611,22 +651,29 @@ void TestHostController::hostStaysResponsiveWhileStreaming()
         rtts.append(t.elapsed());
     }
 
-    QVERIFY2(rtts.size() >= 20, qPrintable(QStringLiteral("样本不足（%1/25）").arg(rtts.size())));
+    // 一次都没跑通 = 链路坏了，跟桌面大小无关，这条永远有效。
+    QVERIFY2(!rtts.isEmpty(), "一次 TokenReq→TokenGrant 往返都没回来");
+
     std::sort(rtts.begin(), rtts.end());
     const qint64 med = rtts.at(rtts.size() / 2);
     const qint64 max = rtts.last();
     qInfo("host responsiveness while streaming: n=%d med=%lldms max=%lldms",
           static_cast<int>(rtts.size()), static_cast<long long>(med), static_cast<long long>(max));
 
-    // 桌面面积超出判据适用范围时跳过：这里的数字反映分辨率，不反映退化。
+    // 桌面面积超出判据适用范围时跳过：这里的数字反映分辨率（以及「exe 刚链接、
+    // 缓存还冷」这类环境噪声），不反映退化。
+    // ⚠️ 这个判断**必须排在样本数断言之前**：4K 桌面上每拍采集 + 编码本身就慢，
+    // 根本凑不满 25 个样本，先断言样本数会把「本来就要跳过」的用例变成假红
+    //（2026-11-17 实测：同一台机器上 HEAD 原码重编也只剩 2–3 个样本）。
     const QSize desk = desktopSize();
     if (qint64(desk.width()) * desk.height() > kMaxMeasuredPixels) {
         QSKIP(qPrintable(QStringLiteral(
             "桌面 %1×%2 上单帧采集+编码成本本身就有几百毫秒，绝对毫秒判据不适用"
-            "（实测 med=%3ms max=%4ms，仅供观察）")
-            .arg(desk.width()).arg(desk.height()).arg(med).arg(max)));
+            "（实测 n=%3 med=%4ms max=%5ms，仅供观察）")
+            .arg(desk.width()).arg(desk.height()).arg(rtts.size()).arg(med).arg(max)));
     }
 
+    QVERIFY2(rtts.size() >= 20, qPrintable(QStringLiteral("样本不足（%1/25）").arg(rtts.size())));
     QVERIFY2(max < 500, qPrintable(QStringLiteral("推流期间被控端响应退化到 %1 ms").arg(max)));
 }
 
@@ -789,6 +836,298 @@ void TestHostController::invalidScreenSelectDoesNotChangeOutput()
 
     QCOMPARE(lists.last().current, beforeCurrent);
     QCOMPARE(hc.screenOutputIndex(), beforeIndex);
+}
+
+// 反向传文件（被控端 → 控制端）：机主复制的那批只发给**正在操作本机**的人。
+//
+// 两个判据：
+// ① 没人持操作权 ⇒ 一帧都不发。把机主的剪贴板推给一个只看着屏幕的人，
+//    等于绕过「谁在操作」这条线 —— 这是本功能唯一的安全口径。
+// ② 有人持操作权 ⇒ 文件真的落到对端，内容逐字节一致（sha 校验在 FileReceiver 里做）。
+void TestHostController::clipboardFilesGoToTheTokenHolder()
+{
+    QTemporaryDir recvDir;
+    QVERIFY(recvDir.isValid());
+    QTemporaryDir sendDir;
+    QVERIFY(sendDir.isValid());
+
+    const QString src = QDir(sendDir.path()).absoluteFilePath(QStringLiteral("回传.txt"));
+    {
+        QFile file(src);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QByteArrayLiteral("host-to-client"));
+        file.close();
+    }
+
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    // 控制端那侧的接收器（生产里在 ClientConnection 内，这里直接用同一个类）
+    lanrdp::FileReceiver receiver(recvDir.path());
+    QStringList landed;
+    QObject::connect(&receiver, &lanrdp::FileReceiver::finished, &receiver,
+                     [&landed](bool ok, const QString &path, const QString &) {
+                         if (ok)
+                             landed.append(path);
+                     });
+    QObject::connect(&client, &lanrdp::Session::frameReceived, &receiver,
+                     [&receiver, &client](const lanrdp::Frame &frame) {
+                         receiver.onFrame(&client, frame);
+                     });
+
+    // ⚠️ QSignalSpy 而不是「lambda 捕获局部的 QStringList」：`logs` 声明在 `hc`
+    // 之后，会先于它析构，而 `~HostController` → `stop()` 还会 emit 日志。
+    QSignalSpy logs(&hc, &lanrdp::HostController::logLine);
+
+    // ① 还没人持操作权
+    QVERIFY(!hc.hasInputHolder());
+    QVERIFY2(!hc.sendClipboardFilesToHolder({src}), "没有人持操作权时不该发");
+    QVERIFY2(!logLines(logs).filter(QStringLiteral("没有控制端在操作本机")).isEmpty(),
+             qPrintable(logLines(logs).join(QLatin1Char('\n'))));
+    QTest::qWait(300);
+    QVERIFY2(landed.isEmpty(), "被拒绝时不该有任何文件落到对端");
+
+    // ② 拿到操作权
+    lanrdp::Frame req;
+    req.type = static_cast<std::uint8_t>(lanrdp::FrameType::TokenReq);
+    client.sendFrame(req);
+    QTRY_VERIFY(hc.hasInputHolder());
+
+    QVERIFY(hc.sendClipboardFilesToHolder({src}));
+    QTRY_COMPARE_WITH_TIMEOUT(landed.size(), 1, 15000);
+
+    QCOMPARE(QFileInfo(landed.first()).fileName(), QStringLiteral("回传.txt"));
+    QFile back(landed.first());
+    QVERIFY(back.open(QIODevice::ReadOnly));
+    QCOMPARE(back.readAll(), QByteArrayLiteral("host-to-client"));
+}
+
+// 【被控 → 发送文件…】：机主自己挑的文件，同一个收件人、同一道门，
+// 但**不带** `CLIPBOARD_FILES` 清单 —— 那一帧的意思是「凑齐了写进对方的剪贴板」，
+// 手挑的文件只是文件，多带一帧就等于替对方改剪贴板。
+void TestHostController::pickedFilesGoToTheTokenHolder()
+{
+    QTemporaryDir recvDir;
+    QVERIFY(recvDir.isValid());
+    QTemporaryDir sendDir;
+    QVERIFY(sendDir.isValid());
+
+    const QString src = QDir(sendDir.path()).absoluteFilePath(QStringLiteral("手挑.txt"));
+    {
+        QFile file(src);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QByteArrayLiteral("picked-by-owner"));
+        file.close();
+    }
+
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    lanrdp::FileReceiver receiver(recvDir.path());
+    QStringList landed;
+    QList<int> types;
+    QObject::connect(&receiver, &lanrdp::FileReceiver::finished, &receiver,
+                     [&landed](bool ok, const QString &path, const QString &) {
+                         if (ok)
+                             landed.append(path);
+                     });
+    QObject::connect(&client, &lanrdp::Session::frameReceived, &receiver,
+                     [&receiver, &client, &types](const lanrdp::Frame &frame) {
+                         types.append(int(frame.type));
+                         receiver.onFrame(&client, frame);
+                     });
+
+    // 同上：必须是 QSignalSpy，不能捕获局部的 QStringList。
+    QSignalSpy logs(&hc, &lanrdp::HostController::logLine);
+
+    // ① 还没人持操作权：发不出去，也不该有半个字节上线
+    QVERIFY(!hc.hasInputHolder());
+    QVERIFY2(!hc.sendFilesToHolder({src}), "没有人持操作权时不该发");
+    QVERIFY2(!logLines(logs).filter(QStringLiteral("没有控制端在操作本机")).isEmpty(),
+             qPrintable(logLines(logs).join(QLatin1Char('\n'))));
+    QTest::qWait(300);
+    QVERIFY2(landed.isEmpty(), "被拒绝时不该有任何文件落到对端");
+    QVERIFY2(!types.contains(int(lanrdp::FrameType::FileHeader)),
+             "被拒绝时不该发 FILE_HEADER");
+
+    // ② 拿到操作权
+    lanrdp::Frame req;
+    req.type = static_cast<std::uint8_t>(lanrdp::FrameType::TokenReq);
+    client.sendFrame(req);
+    QTRY_VERIFY(hc.hasInputHolder());
+
+    QVERIFY(hc.sendFilesToHolder({src}));
+    QTRY_COMPARE_WITH_TIMEOUT(landed.size(), 1, 15000);
+
+    QCOMPARE(QFileInfo(landed.first()).fileName(), QStringLiteral("手挑.txt"));
+    QFile back(landed.first());
+    QVERIFY(back.open(QIODevice::ReadOnly));
+    QCOMPARE(back.readAll(), QByteArrayLiteral("picked-by-owner"));
+
+    QVERIFY2(!types.contains(int(lanrdp::FrameType::ClipboardFiles)),
+             "手挑的文件不该发剪贴板清单（那会让对端把它们写进自己的剪贴板）");
+}
+
+// 隐私遮挡的宿主侧契约。
+// 「暂停期间真的没发帧」由 test_streamer::pauseStopsFramesAndResumeForcesKeyframe 守；
+// 这里守的是另一半：**锁**。而且必须跨 stop()/start() 保持 —— 停监听会清锁，
+// 若不在重新监听时补回去，就会留下「本机黑着屏、新连进来的人却能操作」这种状态。
+void TestHostController::privacyCurtainLocksInputAndSurvivesRestart()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("pw")));
+
+    QVERIFY(!hc.privacyCurtain());
+    QVERIFY(!hc.inputLocked());
+
+    hc.setPrivacyCurtain(true);
+    QVERIFY(hc.privacyCurtain());
+    QVERIFY2(hc.inputLocked(), "遮挡期间必须锁住键鼠：黑着屏还能被操作是最坏的状态");
+
+    // 幂等：热键与菜单同一拍触发时不该翻回去
+    hc.setPrivacyCurtain(true);
+    QVERIFY(hc.privacyCurtain());
+    QVERIFY(hc.inputLocked());
+
+    hc.stop();
+    QVERIFY2(!hc.inputLocked(), "停监听本就会清锁（既有语义，这段不改它）");
+    QVERIFY(hc.start(0, QStringLiteral("pw")));
+    QVERIFY2(hc.inputLocked(), "遮挡没解除就重新监听，锁必须补回来");
+
+    hc.setPrivacyCurtain(false);
+    QVERIFY(!hc.privacyCurtain());
+    QVERIFY2(!hc.inputLocked(), "退出遮挡要把自己加的那把锁解开");
+}
+
+// 机主自己先锁了，再开遮挡、再关：锁必须留着 —— 遮挡只解自己加的那把。
+void TestHostController::privacyCurtainKeepsOwnersOwnLock()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("pw")));
+
+    hc.takeInput();
+    QVERIFY(hc.inputLocked());
+
+    hc.setPrivacyCurtain(true);
+    QVERIFY(hc.inputLocked());
+
+    hc.setPrivacyCurtain(false);
+    QVERIFY2(hc.inputLocked(), "机主自己锁的那把不能被遮挡顺手解开");
+}
+
+// 遮挡必须连声音一起停 —— 只停画面等于「捂住眼睛没捂住嘴」：
+// 对方听得到声音，照样能推断机主在干什么。
+//
+// 音频走的是与画面**独立**的一条线（AudioCapturer → AudioStreamer），
+// `ScreenStreamer::setPaused` 一点也管不到它，所以必须在这里显式停。
+void TestHostController::privacyCurtainAlsoSilencesAudio()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    // 第一个控制端接入才起采集。没有音频输出设备的机器上它必然起不来 —— 那是环境事实。
+    QElapsedTimer up;
+    up.start();
+    while (!hc.audioCaptureRunning() && up.elapsed() < 2000)
+        QTest::qWait(50);
+    const bool audioAvailable = hc.audioCaptureRunning();
+
+    // ① 遮挡期间一块都不该采 —— 这条在任何环境下都要成立
+    hc.setPrivacyCurtain(true);
+    QVERIFY2(!hc.audioCaptureRunning(),
+             "遮挡期间还在采集声音：屏幕黑了，声音照样送给对方");
+
+    hc.setPrivacyCurtain(false);
+
+    if (!audioAvailable)
+        QSKIP("本机没有可用的音频输出设备（只验到「遮挡必须停采集」这一半）");
+
+    // ② 撤销后要自己回来 —— 不能等下一个控制端接入才恢复（那时可能一直没人来）
+    QElapsedTimer back;
+    back.start();
+    while (!hc.audioCaptureRunning() && back.elapsed() < 2000)
+        QTest::qWait(50);
+    QVERIFY2(hc.audioCaptureRunning(), "撤销遮挡后声音没回来");
+}
+
+// 遮挡期间**新连进来的人**不能把采集重新拉起来。
+//
+// 坑在 handleAuthenticated：「第一个音频目标接入就 startCapture」是无条件的，
+// 遮挡期间它会把刚停下的设备又开起来 —— 现象是「盖着黑布却开始送声音」，
+// 而且日志里只会看到一句「控制端已通过鉴权」，很难联想到音频。
+void TestHostController::privacyCurtainKeepsNewClientFromStartingAudio()
+{
+    lanrdp::HostController hc;
+    QVERIFY(hc.start(0, QStringLiteral("s3cret")));
+
+    // 先确认真能起采集 —— 否则这条在没有声卡的机器上永远是假绿
+    {
+        auto *probe = new QTcpSocket();
+        probe->connectToHost(QHostAddress::LocalHost, hc.port());
+        QVERIFY(probe->waitForConnected(3000));
+
+        lanrdp::Session client(probe);
+        lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+        auth.start();
+        QTRY_COMPARE(hc.clientCount(), 1);
+
+        QElapsedTimer up;
+        up.start();
+        while (!hc.audioCaptureRunning() && up.elapsed() < 2000)
+            QTest::qWait(50);
+        if (!hc.audioCaptureRunning())
+            QSKIP("本机没有可用的音频输出设备（这条测不出东西）");
+
+        // 最后一个听的人走了，采集自己停（既有语义，这里只用来把状态清零）
+        probe->disconnectFromHost();
+        QTRY_COMPARE_WITH_TIMEOUT(hc.clientCount(), 0, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!hc.audioCaptureRunning(), 3000);
+    }
+
+    hc.setPrivacyCurtain(true);
+    QVERIFY2(!hc.audioCaptureRunning(), "遮挡开始时采集就该停了");
+
+    // 现在接入的这个人 firstAudioTarget 为真，是最容易把设备重新拉起来的那条路
+    auto *socket = new QTcpSocket();
+    socket->connectToHost(QHostAddress::LocalHost, hc.port());
+    QVERIFY(socket->waitForConnected(3000));
+
+    lanrdp::Session client(socket);
+    lanrdp::AuthClient auth(&client, QStringLiteral("s3cret"));
+    auth.start();
+    QTRY_COMPARE(hc.clientCount(), 1);
+
+    // 起线程 + CoInitialize + 打开设备约几百毫秒，给足时间再判
+    QTest::qWait(800);
+    QVERIFY2(!hc.audioCaptureRunning(),
+             "遮挡期间新连进来的控制端把声音采集又拉起来了：黑着屏反而开始送声音");
 }
 
 QTEST_GUILESS_MAIN(TestHostController)

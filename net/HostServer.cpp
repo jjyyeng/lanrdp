@@ -1,6 +1,7 @@
 #include "net/HostServer.h"
 
 #include "common/I18n.h"
+#include "common/LanAddresses.h"
 #include "net/Auth.h"
 #include "net/Session.h"
 
@@ -177,6 +178,23 @@ bool HostServer::isListening() const
     return server_ && server_->isListening();
 }
 
+void HostServer::setPeerFilter(std::function<bool(const QHostAddress &)> filter)
+{
+    peerFilter_ = std::move(filter);
+}
+
+// 没有注入过滤器时，按**当场**的本机子网算 —— 不缓存。
+//
+// 缓存下来的话，插拔网线 / 换 Wi-Fi / DHCP 换地址之后判据就过期了，而症状是
+// 「同屋的机器忽然连不上」，排查方向会完全跑偏。每个连接枚举一次网卡，
+// 一次几十微秒，连接本身是稀罕事件，值这个价。
+bool HostServer::acceptsPeer(const QHostAddress &peer) const
+{
+    if (peerFilter_)
+        return peerFilter_(peer);
+    return isPeerAllowed(peer, localSubnets());
+}
+
 // 踢出单个控制端（对外接口）。按 **id** 而不是指针查池：调用方手里的可能是
 // 一份早先的快照，那条会话可能已经释放、地址又被新连接复用（ABA）——
 // 拿指针来查会踢错人，拿 id 来查最多是 no-op。
@@ -266,6 +284,22 @@ void HostServer::onNewConnection()
 {
     while (server_->hasPendingConnections()) {
         QTcpSocket *socket = server_->nextPendingConnection();
+
+        // 来源过滤：只受理本机某块网卡所在子网内的对端。
+        //
+        // 为什么在**这里**而不是鉴权里：监听地址是 0.0.0.0，VPN / 热点 / 虚拟机桥接
+        // 上的对端与局域网对端在协议上毫无区别，能分辨的只有来源地址。放在最前面，
+        // 既省掉一次握手往返，也不会给「连上不说话」的扫描留半个连接。
+        //
+        // 也不记进失败退避：这不是「有人在猜口令」，把扫描流量算进退避表只会让
+        // 真正的失败计数失去意义。
+        if (!acceptsPeer(socket->peerAddress())) {
+            // abort 后必须自己 deleteLater —— 它还是 QTcpServer 的子对象。
+            emit peerOutsideLan(sourceIpKey(socket->peerAddress()));
+            socket->abort();
+            socket->deleteLater();
+            continue;
+        }
 
         // 登录失败退避：**在新连接建立时就拦**。
         //

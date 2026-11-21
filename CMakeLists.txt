@@ -41,6 +41,7 @@ add_library(lanrdp_core STATIC
     net/AuthBackoff.cpp
     net/HostServer.cpp
     net/FileReceiver.cpp
+    net/FileSendQueue.cpp
     net/FileSender.cpp
     net/ClipboardSync.cpp
     # 往返时间（SIO_TCP_INFO）：质量读数里唯一需要问操作系统的量。
@@ -130,6 +131,11 @@ endif()
 #    （core 不依赖 Qt Widgets），所以哪些目标用到 MainWindow，就得把它们一并列进来。
 set(LANRDP_UI_SOURCES
     app/MainWindow.cpp
+    # 全局热键（⑮ / 急停）：RegisterHotKey 挂在一个永不显示的窗口上，
+    # WM_HOTKEY 由 QAbstractNativeEventFilter 收。必须进 UI 源 —— 它要 HWND。
+    app/GlobalHotkey.cpp
+    # 隐私遮挡的本机那一层：铺满虚拟桌面的纯黑置顶窗
+    app/PrivacyCurtain.cpp
     # 任务栏按钮角标（ITaskbarList3::SetOverlayIcon）+ 接入时闪任务栏。
     # 依赖 QWidget 取 HWND / DPR，所以只能进 UI 源。
     app/TaskbarBadge.cpp
@@ -476,13 +482,19 @@ qt_add_resources(test_i18n "i18n"
 )
 add_dependencies(test_i18n lanrdp)
 
+# ⑮ 全局热键：解析 + 「被占用时静默降级」的注册策略。
+# 真实 RegisterHotKey 在无桌面会话里必然失败，所以注册行为必须能注入假平台。
+lanrdp_add_test(test_globalhotkey
+    SOURCES tests/test_globalhotkey.cpp app/GlobalHotkey.cpp
+    LIBS Qt6::Widgets
+    LABELS "ui"
+)
+
 lanrdp_add_test(test_mainwindow_ui
     SOURCES tests/test_mainwindow_ui.cpp ${LANRDP_UI_SOURCES}
     LIBS Qt6::Widgets
     LABELS "net;ui"
-)
-
-# 同 test_i18n：主程序那份 qm 资源不共享，这个 exe 也要自己带一份，
+)# 同 test_i18n：主程序那份 qm 资源不共享，这个 exe 也要自己带一份，
 # 否则「切换语言后界面真的变了」这条断言在这里跑不出英文。
 qt_add_resources(test_mainwindow_ui "i18n"
     PREFIX "/i18n"

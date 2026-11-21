@@ -5,6 +5,8 @@
 #include <QString>
 #include <QVector>
 
+#include <functional>
+
 #include "net/AuthBackoff.h"
 
 class QTcpServer;
@@ -66,6 +68,14 @@ public:
     // 当前「已 accept、握手未出结论」的连接数（诊断与测试用）。
     int pendingAuthCount() const { return pendingAuth_.size(); }
 
+    // 入站来源过滤：只受理「本机某块网卡所在子网内」的对端（回环一律放行）。
+    //
+    // 拦在 accept 之后、退避判定之前 —— 这类连接不该进来，也**不该**记进失败退避：
+    // 那不是「有人在猜口令」，把它算进去只会让扫描流量污染退避表。
+    // 传一个空的 function 即恢复默认策略（`isPeerAllowed` 对着当场的本机子网算）。
+    // 测试用它注入「全拒」以覆盖拒绝分支 —— 否则那条分支只能靠换一台机器才能走到。
+    void setPeerFilter(std::function<bool(const QHostAddress &)> filter);
+
     QVector<Session *> sessions() const { return sessions_; }
 
     // 踢出控制端。dropClient 按**会话 id** 断开指定会话（id 不在池中则安全 no-op）；
@@ -102,6 +112,8 @@ signals:
     void clientDisconnected(lanrdp::Session *session);
     // 新连接因失败退避被直接挡下（尚未建 Session）。waitMs = 还需等多久。
     void connectionThrottled(const QString &sourceIp, qint64 waitMs);
+    // 新连接来自本机任何局域网之外（VPN / 热点 / 别的网段），已直接断开。
+    void peerOutsideLan(const QString &sourceIp);
 
 private slots:
     void onNewConnection();
@@ -135,6 +147,9 @@ private:
     int               heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
     int               deadTimeoutMs_       = kDefaultDeadTimeoutMs;
     AuthBackoff       backoff_;
+    // 空 = 用 isPeerAllowed 对着当场的本机子网判（见 setPeerFilter）
+    std::function<bool(const QHostAddress &)> peerFilter_;
+    bool acceptsPeer(const QHostAddress &peer) const;
 };
 
 } // namespace lanrdp

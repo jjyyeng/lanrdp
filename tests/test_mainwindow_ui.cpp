@@ -1,6 +1,7 @@
 #include <QtTest/QtTest>
 
 #include <QAbstractButton>
+#include <QApplication>
 #include <QAction>
 #include <QComboBox>
 #include <QDir>
@@ -68,6 +69,19 @@ QString testLogPath()
     static QTemporaryDir dir;
     static int           counter = 0;
     return dir.path() + QStringLiteral("/ui-%1.log").arg(++counter);
+}
+
+// 遮挡黑窗是否真的挂出来了。
+// 只断言 `privacyCurtainShown()` 不够 —— 那只是 GUI 侧的一个布尔，
+// 「窗子到底显示没显示」才是这个功能的**本体**（黑窗不出现 = 什么都没挡住）。
+bool curtainWindowVisible()
+{
+    const auto widgets = QApplication::topLevelWidgets();
+    for (const QWidget *w : widgets) {
+        if (w && w->objectName() == QStringLiteral("privacyCurtain") && w->isVisible())
+            return true;
+    }
+    return false;
 }
 
 class TestMainWindowUi : public QObject
@@ -166,6 +180,9 @@ private slots:
     void clearLogEmptiesBufferOnly();          // 清日志 = 清内存缓冲
     void disconnectButtonStartsDisabled();
     void hostButtonTogglesListening();
+    void sendFileEntryOnlyOfferedWhileHosting();
+    void privacyCurtainTogglesFromMenu();
+    void panicStopStopsListening();
     void disconnectButtonFollowsConnectionState();
     void transferProgressBarsStartHidden();
 
@@ -1902,6 +1919,62 @@ void TestMainWindowUi::hostButtonTogglesListening()
     w.stopHost();
     QVERIFY(!w.isHosting());
     QCOMPARE(listenAct->text(), QStringLiteral("开始监听…"));
+}
+
+// 被控端没有画面格、也没有悬浮条 ⇒【被控 → 发送文件…】是它唯一放得下手的入口。
+// 没在监听时挑完文件也没处发：先选后报错纯属浪费，故只在监听中可用。
+void TestMainWindowUi::sendFileEntryOnlyOfferedWhileHosting()
+{
+    MainWindow w(testLogPath());
+
+    auto *act = w.findChild<QAction *>(QStringLiteral("actionSendFileToHolder"));
+    QVERIFY2(act, "【被控】菜单里应当有发送文件入口 actionSendFileToHolder");
+    QCOMPARE(act->text(), QStringLiteral("发送文件…"));
+    QVERIFY2(!act->isEnabled(), "还没开始监听时不该能发文件");
+
+    w.startHost(0, QStringLiteral("secret"));
+    QVERIFY(w.isHosting());
+    QVERIFY2(act->isEnabled(), "监听中应当能发文件");
+
+    w.stopHost();
+    QVERIFY2(!act->isEnabled(), "停止监听后应恢复不可用");
+}
+
+// 隐私遮挡：菜单项是双态，黑窗跟着它显隐（热键与菜单走同一条路径）。
+void TestMainWindowUi::privacyCurtainTogglesFromMenu()
+{
+    MainWindow w(testLogPath());
+
+    auto *act = w.findChild<QAction *>(QStringLiteral("actionPrivacyCurtain"));
+    QVERIFY2(act, "【被控】菜单里应当有隐私遮挡项 actionPrivacyCurtain");
+    QCOMPARE(act->text(), QStringLiteral("隐私遮挡"));
+    QVERIFY(!w.privacyCurtainShown());
+
+    act->trigger();
+    QVERIFY2(w.privacyCurtainShown(), "点一次应当进入遮挡");
+    QCOMPARE(act->text(), QStringLiteral("取消遮挡"));
+    QVERIFY2(curtainWindowVisible(), "遮挡时黑窗必须真的盖在屏幕上");
+
+    act->trigger();
+    QVERIFY2(!w.privacyCurtainShown(), "再点一次应当退出遮挡");
+    QCOMPARE(act->text(), QStringLiteral("隐私遮挡"));
+    QVERIFY2(!curtainWindowVisible(), "退出遮挡后黑窗必须收起来");
+}
+
+// 急停绑的是 stopHost()（真停监听），不是「踢掉所有控制端」——
+// 后者踢了还能再进，叫急停名不副实。
+void TestMainWindowUi::panicStopStopsListening()
+{
+    MainWindow w(testLogPath());
+    w.startHost(0, QStringLiteral("secret"));
+    QVERIFY(w.isHosting());
+
+    w.emergencyStop();
+    QVERIFY2(!w.isHosting(), "急停之后必须真停监听，而不只是踢人");
+
+    // 没在监听时按它不该有任何副作用（热键随时可能被误触）
+    w.emergencyStop();
+    QVERIFY(!w.isHosting());
 }
 
 // 【断开】的可用性跟着连接状态走：连上 -> 可用；点断开 -> 复原。

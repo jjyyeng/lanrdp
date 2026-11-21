@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QHostAddress>
+#include <QList>
 #include <QString>
 #include <QStringList>
 
@@ -41,5 +43,28 @@ QString connectionCardText(const QStringList &addresses, quint16 port);
 // 拼接放在这里而不是对话框里，理由同 connectionCardText：能脱离剪贴板单测
 //（offscreen 平台上 QClipboard 不可靠）。
 QString inviteText(const QStringList &addresses, quint16 port, const QString &password);
+
+// ---- 入站来源过滤 ----
+//
+// 监听地址是 `0.0.0.0`：本机**每一块**网卡都在受理连接，包括 VPN 隧道、手机热点、
+// 虚拟机桥接。这些对端与局域网里的对端在协议上完全一样，唯一能分辨的就是**来源地址**。
+// 这里按「来源是否落在本机某块网卡所在的子网内」来判，而不是去绑某一块网卡的地址 ——
+// 绑地址会连带砍掉另外几条真实可达的路（多网卡机器），也会挡掉 127.0.0.1 自测。
+struct LocalSubnet
+{
+    QHostAddress network;          // 网络地址：主机位已按前缀长度清零
+    int          prefixLength = 0;
+};
+
+// 本机各网卡所在的子网。
+//
+// 与 lanAddresses() 的口径**故意不同**：那里排除虚拟网卡，因为「把地址报给对方」时报
+// 虚拟网卡只会误导；这里**不排除**，因为从 vEthernet / 隧道那侧真的可能有对端连进来
+//（本机虚拟机、容器、VPN 对端），挡掉它们只会让人以为程序坏了。回环与未启用网卡仍排除。
+QList<LocalSubnet> localSubnets();
+
+// 对端地址是否可以受理：回环一律放行（单机双开、本机自测都指着它），其余必须落在
+// 给定子网内。`subnets` 为空时只有回环放行 —— 一块可用网卡都没有，就没有「局域网」可言。
+bool isPeerAllowed(const QHostAddress &peer, const QList<LocalSubnet> &subnets);
 
 } // namespace lanrdp
